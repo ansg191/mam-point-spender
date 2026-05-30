@@ -91,6 +91,11 @@ pub fn build(b: *std.Build) void {
         }),
     });
 
+    // Reserve macOS Mach-O headerpad so codesign can add LC_CODE_SIGNATURE
+    // after stripping. Without this, signing fails with "no room for a new
+    // loader command". Ignored by non-Mach-O linkers.
+    exe.headerpad_size = 0x1000;
+
     // This declares intent for the executable to be installed into the
     // install prefix when running `zig build` (i.e. when executing the default
     // step). By default the install prefix is `zig-out/` but can be overridden
