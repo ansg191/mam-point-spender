@@ -54,6 +54,24 @@ archives:
       - goos: windows
         formats: [zip]
 
+nfpms:
+  - package_name: mam-point-spender
+    file_name_template: "{{ .ConventionalFileName }}"
+    maintainer: Anshul Gupta <ansg191@yahoo.com>
+    homepage: https://github.com/ansg191/mam-point-spender
+    description: MAM point spender
+    license: AGPL-3.0-or-later
+    formats:
+      - deb
+      - rpm
+      - apk
+    bindir: /usr/bin
+    contents:
+      - src: LICENSE
+        dst: /usr/share/doc/mam-point-spender/LICENSE
+        file_info:
+          mode: 0644
+
 checksum:
   name_template: "{{ .ProjectName }}_{{ .Version }}_checksums.txt"
   algorithm: sha256
