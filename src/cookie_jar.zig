@@ -292,3 +292,299 @@ test "cookieHeader" {
     defer std.testing.allocator.free(header);
     try std.testing.expectEqualStrings(header, "sessionId=abc123; theme=light");
 }
+
+test "Cookie.parseLine parses a well-formed Netscape cookie line" {
+    const line = "example.com\tTRUE\t/\tFALSE\t1700000000\tsession\txyz";
+    const cookie = try Cookie.parseLine(line);
+
+    try std.testing.expectEqualStrings("example.com", cookie.domain);
+    try std.testing.expect(cookie.include_subdomains);
+    try std.testing.expectEqualStrings("/", cookie.path);
+    try std.testing.expect(!cookie.secure);
+    try std.testing.expectEqual(@as(i64, 1700000000), cookie.expires_at);
+    try std.testing.expectEqualStrings("session", cookie.name);
+    try std.testing.expectEqualStrings("xyz", cookie.value);
+}
+
+test "Cookie.parseLine treats non-TRUE flag values as false" {
+    const line = "example.com\tFALSE\t/path\tTRUE\t0\tname\tvalue";
+    const cookie = try Cookie.parseLine(line);
+
+    try std.testing.expect(!cookie.include_subdomains);
+    try std.testing.expect(cookie.secure);
+    try std.testing.expectEqual(@as(i64, 0), cookie.expires_at);
+    try std.testing.expectEqualStrings("/path", cookie.path);
+}
+
+test "Cookie.parseLine returns InvalidFormat for missing fields" {
+    const line = "example.com\tTRUE\t/\tFALSE\t1700000000\tsession";
+    try std.testing.expectError(error.InvalidFormat, Cookie.parseLine(line));
+}
+
+test "Cookie.parseLine returns parse error for non-numeric expires" {
+    const line = "example.com\tTRUE\t/\tFALSE\tnot-a-number\tsession\txyz";
+    try std.testing.expectError(error.InvalidCharacter, Cookie.parseLine(line));
+}
+
+test "Cookie.toLine round trips through parseLine" {
+    const original: Cookie = .{
+        .domain = ".example.com",
+        .include_subdomains = true,
+        .path = "/api",
+        .secure = true,
+        .expires_at = 1234567890,
+        .name = "auth",
+        .value = "token-value",
+    };
+
+    var writer: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer writer.deinit();
+    try original.toLine(&writer.writer);
+
+    const serialized = writer.written();
+    try std.testing.expectEqualStrings(
+        ".example.com\tTRUE\t/api\tTRUE\t1234567890\tauth\ttoken-value",
+        serialized,
+    );
+
+    const parsed = try Cookie.parseLine(serialized);
+    try std.testing.expectEqualStrings(original.domain, parsed.domain);
+    try std.testing.expectEqual(original.include_subdomains, parsed.include_subdomains);
+    try std.testing.expectEqualStrings(original.path, parsed.path);
+    try std.testing.expectEqual(original.secure, parsed.secure);
+    try std.testing.expectEqual(original.expires_at, parsed.expires_at);
+    try std.testing.expectEqualStrings(original.name, parsed.name);
+    try std.testing.expectEqualStrings(original.value, parsed.value);
+}
+
+test "Cookie.toLine writes FALSE flags correctly" {
+    const cookie: Cookie = .{
+        .domain = "example.com",
+        .include_subdomains = false,
+        .path = "/",
+        .secure = false,
+        .expires_at = 0,
+        .name = "n",
+        .value = "v",
+    };
+
+    var writer: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer writer.deinit();
+    try cookie.toLine(&writer.writer);
+    try std.testing.expectEqualStrings(
+        "example.com\tFALSE\t/\tFALSE\t0\tn\tv",
+        writer.written(),
+    );
+}
+
+test "Cookie.isExpired treats expires_at == 0 as a session cookie" {
+    const cookie: Cookie = .{
+        .domain = "example.com",
+        .include_subdomains = false,
+        .path = "/",
+        .secure = false,
+        .expires_at = 0,
+        .name = "n",
+        .value = "v",
+    };
+    try std.testing.expect(!cookie.isExpired(std.testing.io));
+}
+
+test "Cookie.isExpired returns true for past timestamps" {
+    const cookie: Cookie = .{
+        .domain = "example.com",
+        .include_subdomains = false,
+        .path = "/",
+        .secure = false,
+        .expires_at = 1,
+        .name = "n",
+        .value = "v",
+    };
+    try std.testing.expect(cookie.isExpired(std.testing.io));
+}
+
+test "Cookie.isExpired returns false for far-future timestamps" {
+    const cookie: Cookie = .{
+        .domain = "example.com",
+        .include_subdomains = false,
+        .path = "/",
+        .secure = false,
+        .expires_at = std.math.maxInt(i64),
+        .name = "n",
+        .value = "v",
+    };
+    try std.testing.expect(!cookie.isExpired(std.testing.io));
+}
+
+test "addCookie defaults to URI host without subdomain matching" {
+    var jar = CookieJar.init(std.testing.allocator);
+    defer jar.deinit();
+
+    const uri = try std.Uri.parse("https://example.com/");
+    try jar.addCookie(std.testing.io, uri, "a=1");
+
+    try std.testing.expectEqual(@as(usize, 1), jar.cookies.items.len);
+    try std.testing.expectEqualStrings("example.com", jar.cookies.items[0].domain);
+    try std.testing.expect(!jar.cookies.items[0].include_subdomains);
+    try std.testing.expectEqualStrings("/", jar.cookies.items[0].path);
+    try std.testing.expect(!jar.cookies.items[0].secure);
+    try std.testing.expectEqual(@as(i64, 0), jar.cookies.items[0].expires_at);
+}
+
+test "addCookie with Domain attribute enables subdomain matching" {
+    var jar = CookieJar.init(std.testing.allocator);
+    defer jar.deinit();
+
+    const uri = try std.Uri.parse("https://example.com/");
+    try jar.addCookie(std.testing.io, uri, "a=1; Domain=.example.com");
+
+    try std.testing.expectEqualStrings(".example.com", jar.cookies.items[0].domain);
+    try std.testing.expect(jar.cookies.items[0].include_subdomains);
+}
+
+test "addCookie Max-Age <= 0 skips the cookie" {
+    var jar = CookieJar.init(std.testing.allocator);
+    defer jar.deinit();
+
+    const uri = try std.Uri.parse("https://example.com/");
+    try jar.addCookie(std.testing.io, uri, "expired=1; Max-Age=0");
+    try jar.addCookie(std.testing.io, uri, "expired2=1; Max-Age=-5");
+
+    try std.testing.expectEqual(@as(usize, 0), jar.cookies.items.len);
+}
+
+test "addCookie Max-Age sets a future expiry" {
+    var jar = CookieJar.init(std.testing.allocator);
+    defer jar.deinit();
+
+    const uri = try std.Uri.parse("https://example.com/");
+    try jar.addCookie(std.testing.io, uri, "a=1; Max-Age=3600");
+
+    const now = std.Io.Clock.real.now(std.testing.io).toSeconds();
+    const expires = jar.cookies.items[0].expires_at;
+    try std.testing.expect(expires > now);
+    try std.testing.expect(expires <= now + 3600);
+}
+
+test "addCookie Max-Age wins over Expires regardless of order" {
+    var jar = CookieJar.init(std.testing.allocator);
+    defer jar.deinit();
+
+    const uri = try std.Uri.parse("https://example.com/");
+    try jar.addCookie(std.testing.io, uri, "a=1; Max-Age=3600; Expires=Wed, 09 Jun 2021 10:18:14 GMT");
+    try jar.addCookie(std.testing.io, uri, "b=1; Expires=Wed, 09 Jun 2021 10:18:14 GMT; Max-Age=3600");
+
+    const now = std.Io.Clock.real.now(std.testing.io).toSeconds();
+    for (jar.cookies.items) |c| {
+        try std.testing.expect(c.expires_at > now);
+    }
+}
+
+test "addCookie replaces an existing cookie with the same name/domain/path" {
+    var jar = CookieJar.init(std.testing.allocator);
+    defer jar.deinit();
+
+    const uri = try std.Uri.parse("https://example.com/");
+    try jar.addCookie(std.testing.io, uri, "session=old");
+    try jar.addCookie(std.testing.io, uri, "session=new");
+
+    try std.testing.expectEqual(@as(usize, 1), jar.cookies.items.len);
+    try std.testing.expectEqualStrings("new", jar.cookies.items[0].value);
+}
+
+test "addCookie keeps cookies with the same name but different path" {
+    var jar = CookieJar.init(std.testing.allocator);
+    defer jar.deinit();
+
+    const uri = try std.Uri.parse("https://example.com/");
+    try jar.addCookie(std.testing.io, uri, "session=root; Path=/");
+    try jar.addCookie(std.testing.io, uri, "session=api; Path=/api");
+
+    try std.testing.expectEqual(@as(usize, 2), jar.cookies.items.len);
+}
+
+test "addCookie returns InvalidFormat for a malformed header" {
+    var jar = CookieJar.init(std.testing.allocator);
+    defer jar.deinit();
+
+    const uri = try std.Uri.parse("https://example.com/");
+    try std.testing.expectError(error.InvalidFormat, jar.addCookie(std.testing.io, uri, "no-equals-sign"));
+}
+
+test "addCookie ignores unknown attributes" {
+    var jar = CookieJar.init(std.testing.allocator);
+    defer jar.deinit();
+
+    const uri = try std.Uri.parse("https://example.com/");
+    try jar.addCookie(std.testing.io, uri, "a=1; HttpOnly; SameSite=Lax");
+
+    try std.testing.expectEqual(@as(usize, 1), jar.cookies.items.len);
+    try std.testing.expectEqualStrings("1", jar.cookies.items[0].value);
+}
+
+test "cookieHeader omits secure cookies over plain HTTP" {
+    var jar = CookieJar.init(std.testing.allocator);
+    defer jar.deinit();
+
+    const https_uri = try std.Uri.parse("https://example.com/");
+    try jar.addCookie(std.testing.io, https_uri, "session=secret; Secure");
+    try jar.addCookie(std.testing.io, https_uri, "theme=light");
+
+    const http_uri = try std.Uri.parse("http://example.com/");
+    const header = try jar.cookieHeader(std.testing.allocator, std.testing.io, http_uri);
+    defer std.testing.allocator.free(header);
+    try std.testing.expectEqualStrings("theme=light", header);
+}
+
+test "cookieHeader omits expired cookies but keeps session cookies" {
+    var jar = CookieJar.init(std.testing.allocator);
+    defer jar.deinit();
+
+    const uri = try std.Uri.parse("https://example.com/");
+    try jar.addCookie(std.testing.io, uri, "session=keep");
+    try jar.addCookie(std.testing.io, uri, "stale=gone; Expires=Wed, 09 Jun 2021 10:18:14 GMT");
+
+    const header = try jar.cookieHeader(std.testing.allocator, std.testing.io, uri);
+    defer std.testing.allocator.free(header);
+    try std.testing.expectEqualStrings("session=keep", header);
+}
+
+test "cookieHeader omits cookies whose domain does not match" {
+    var jar = CookieJar.init(std.testing.allocator);
+    defer jar.deinit();
+
+    const example_uri = try std.Uri.parse("https://example.com/");
+    try jar.addCookie(std.testing.io, example_uri, "a=1");
+
+    const other_uri = try std.Uri.parse("https://other.com/");
+    const header = try jar.cookieHeader(std.testing.allocator, std.testing.io, other_uri);
+    defer std.testing.allocator.free(header);
+    try std.testing.expectEqualStrings("", header);
+}
+
+test "cookieHeader omits cookies whose path does not match" {
+    var jar = CookieJar.init(std.testing.allocator);
+    defer jar.deinit();
+
+    const set_uri = try std.Uri.parse("https://example.com/api");
+    try jar.addCookie(std.testing.io, set_uri, "a=1; Path=/api");
+
+    const root_uri = try std.Uri.parse("https://example.com/");
+    const header = try jar.cookieHeader(std.testing.allocator, std.testing.io, root_uri);
+    defer std.testing.allocator.free(header);
+    try std.testing.expectEqualStrings("", header);
+}
+
+test "cookieHeader applies subdomain rules from Domain attribute" {
+    var jar = CookieJar.init(std.testing.allocator);
+    defer jar.deinit();
+
+    const apex = try std.Uri.parse("https://example.com/");
+    try jar.addCookie(std.testing.io, apex, "shared=1; Domain=.example.com");
+    try jar.addCookie(std.testing.io, apex, "apex_only=1");
+
+    const sub_uri = try std.Uri.parse("https://api.example.com/");
+    const header = try jar.cookieHeader(std.testing.allocator, std.testing.io, sub_uri);
+    defer std.testing.allocator.free(header);
+    try std.testing.expectEqualStrings("shared=1", header);
+}
