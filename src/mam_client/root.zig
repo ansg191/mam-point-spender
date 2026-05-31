@@ -41,7 +41,7 @@ pub const RequestError = CookieJar.CookieHeaderError ||
     http.Client.Request.ReceiveHeadError ||
     Io.Writer.Error ||
     Io.Reader.StreamError ||
-    error{BadResponseStatus};
+    error{ BadResponseStatus, ResponseBodyTooLarge };
 
 fn get(self: *MamClient, gpa: Allocator, uri: std.Uri, cookie_option: CookieOption) RequestError![]const u8 {
     var redirect_buffer: [8 * 1024]u8 = undefined;
@@ -74,7 +74,7 @@ fn get(self: *MamClient, gpa: Allocator, uri: std.Uri, cookie_option: CookieOpti
     }
 
     // Extract useful headers
-    const content_length = response.head.content_length orelse 0;
+    const content_length = std.math.cast(usize, response.head.content_length orelse 0) orelse return error.ResponseBodyTooLarge;
 
     // Handle set-cookie headers
     var header_it = response.head.iterateHeaders();
