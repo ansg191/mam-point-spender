@@ -15,7 +15,7 @@ report_sizes: true
 builds:
   - builder: zig
     flags:
-      - -Doptimize=ReleaseSafe
+      - -Doptimize=ReleaseFast
     targets:
       - x86_64-linux
       - x86_64-windows
