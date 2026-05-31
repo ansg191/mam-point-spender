@@ -20,9 +20,12 @@ builds:
       - x86_64-linux
       - x86_64-windows
       - aarch64-linux
+      - aarch64-windows
+      - arm-linux-musleabihf
       - x86_64-macos
       - aarch64-macos
       - riscv64-linux
+      - riscv32-linux
 
 universal_binaries:
   - replace: true
@@ -48,6 +51,7 @@ archives:
       {{- title .Os }}_
       {{- if eq .Arch "amd64" }}x86_64
       {{- else if eq .Arch "386" }}i386
+      {{- else if eq .Arch "arm" }}armhf
       {{- else }}{{ .Arch }}{{ end }}
     # use zip for windows archives
     format_overrides:
