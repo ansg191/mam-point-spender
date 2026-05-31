@@ -12,14 +12,17 @@ const options = @import("build_options");
 
 cookie_jar: *CookieJar,
 client: http.Client,
+// MAM base URL, e.g. "https://www.myanonamouse.net"
+// Should not have a trailing slash, as the client will append paths to it.
+base_url: []const u8 = MAM_BASE_URL,
 
 const VERSION = options.version;
 const USER_AGENT = "mam-point-spender/" ++ VERSION;
-const MAM_BASE_URL = "https://www.myanonamouse.net/";
-const MAM_SNATCH_SUMMARY_URL = MAM_BASE_URL ++ "jsonLoad.php?snatch_summary";
-const MAM_USER_INFO_URL = MAM_BASE_URL ++ "jsonLoad.php?id={d}";
-const MAM_POINTS_URL = MAM_BASE_URL ++ "json/bonusBuy.php/?spendtype=upload&amount={d}&_={d}";
-const MAM_VIP_URL = MAM_BASE_URL ++ "json/bonusBuy.php/?spendtype=VIP&duration=max&_={d}";
+const MAM_BASE_URL = "https://www.myanonamouse.net";
+const MAM_SNATCH_SUMMARY_URL = "{s}/jsonLoad.php?snatch_summary";
+const MAM_USER_INFO_URL = "{s}/jsonLoad.php?id={d}";
+const MAM_POINTS_URL = "{s}/json/bonusBuy.php/?spendtype=upload&amount={d}&_={d}";
+const MAM_VIP_URL = "{s}/json/bonusBuy.php/?spendtype=VIP&duration=max&_={d}";
 
 pub fn deinit(self: *MamClient) void {
     self.client.deinit();
@@ -91,7 +94,9 @@ fn get(self: *MamClient, gpa: Allocator, uri: std.Uri, cookie_option: CookieOpti
 }
 
 pub fn get_snatch_summary(self: *MamClient, gpa: Allocator, cookie_option: CookieOption) !std.json.Parsed(types.SnatchSummary) {
-    const uri = std.Uri.parse(MAM_SNATCH_SUMMARY_URL) catch unreachable;
+    const url = try std.fmt.allocPrint(gpa, MAM_SNATCH_SUMMARY_URL, .{self.base_url});
+    defer gpa.free(url);
+    const uri = try std.Uri.parse(url);
 
     const body = try self.get(gpa, uri, cookie_option);
     defer gpa.free(body);
@@ -105,14 +110,14 @@ pub fn get_snatch_summary(self: *MamClient, gpa: Allocator, cookie_option: Cooki
 }
 
 pub fn get_user_info(self: *MamClient, gpa: Allocator, uid: u64, cookie_option: CookieOption) !std.json.Parsed(types.UserInfo) {
-    const url = try std.fmt.allocPrint(gpa, MAM_USER_INFO_URL, .{uid});
+    const url = try std.fmt.allocPrint(gpa, MAM_USER_INFO_URL, .{ self.base_url, uid });
     defer gpa.free(url);
     const uri = try std.Uri.parse(url);
 
     const body = try self.get(gpa, uri, cookie_option);
     defer gpa.free(body);
 
-    std.log.debug("Fetched user info for uid {d}: {s}", .{uid, body});
+    std.log.debug("Fetched user info for uid {d}: {s}", .{ uid, body });
 
     return try std.json.parseFromSlice(types.UserInfo, gpa, body, .{
         .allocate = .alloc_always,
@@ -122,7 +127,7 @@ pub fn get_user_info(self: *MamClient, gpa: Allocator, uid: u64, cookie_option: 
 
 pub fn buyVip(self: *MamClient, gpa: Allocator, cookie_option: CookieOption) !void {
     const ts = Io.Clock.real.now(self.client.io).toMilliseconds();
-    const url = try std.fmt.allocPrint(gpa, MAM_VIP_URL, .{ts});
+    const url = try std.fmt.allocPrint(gpa, MAM_VIP_URL, .{ self.base_url, ts });
     defer gpa.free(url);
     const uri = try std.Uri.parse(url);
 
@@ -134,7 +139,7 @@ pub fn buyVip(self: *MamClient, gpa: Allocator, cookie_option: CookieOption) !vo
 
 pub fn buyGb(self: *MamClient, gpa: Allocator, amount: u64, cookie_option: CookieOption) !void {
     const ts = Io.Clock.real.now(self.client.io).toMilliseconds();
-    const url = try std.fmt.allocPrint(gpa, MAM_POINTS_URL, .{amount, ts});
+    const url = try std.fmt.allocPrint(gpa, MAM_POINTS_URL, .{ self.base_url, amount, ts });
     defer gpa.free(url);
     const uri = try std.Uri.parse(url);
 
