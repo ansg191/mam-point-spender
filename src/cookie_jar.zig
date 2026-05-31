@@ -588,3 +588,163 @@ test "cookieHeader applies subdomain rules from Domain attribute" {
     defer std.testing.allocator.free(header);
     try std.testing.expectEqualStrings("shared=1", header);
 }
+
+test "readFile leaves jar empty when the cookies file does not exist" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var jar = CookieJar.init(std.testing.allocator);
+    defer jar.deinit();
+
+    try jar.readFile(std.testing.io, tmp.dir);
+    try std.testing.expectEqual(@as(usize, 0), jar.cookies.items.len);
+}
+
+test "readFile parses cookies and skips comments and blank lines" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const contents =
+        "# Netscape HTTP Cookie File\n" ++
+        "# comment line\n" ++
+        "\n" ++
+        "example.com\tFALSE\t/\tFALSE\t0\tsession\txyz\n" ++
+        ".example.com\tTRUE\t/api\tTRUE\t1700000000\tauth\ttoken\n";
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = PATH, .data = contents });
+
+    var jar = CookieJar.init(std.testing.allocator);
+    defer jar.deinit();
+
+    try jar.readFile(std.testing.io, tmp.dir);
+    try std.testing.expectEqual(@as(usize, 2), jar.cookies.items.len);
+
+    try std.testing.expectEqualStrings("example.com", jar.cookies.items[0].domain);
+    try std.testing.expect(!jar.cookies.items[0].include_subdomains);
+    try std.testing.expectEqualStrings("/", jar.cookies.items[0].path);
+    try std.testing.expect(!jar.cookies.items[0].secure);
+    try std.testing.expectEqual(@as(i64, 0), jar.cookies.items[0].expires_at);
+    try std.testing.expectEqualStrings("session", jar.cookies.items[0].name);
+    try std.testing.expectEqualStrings("xyz", jar.cookies.items[0].value);
+
+    try std.testing.expectEqualStrings(".example.com", jar.cookies.items[1].domain);
+    try std.testing.expect(jar.cookies.items[1].include_subdomains);
+    try std.testing.expectEqualStrings("/api", jar.cookies.items[1].path);
+    try std.testing.expect(jar.cookies.items[1].secure);
+    try std.testing.expectEqual(@as(i64, 1700000000), jar.cookies.items[1].expires_at);
+    try std.testing.expectEqualStrings("auth", jar.cookies.items[1].name);
+    try std.testing.expectEqualStrings("token", jar.cookies.items[1].value);
+}
+
+test "readFile clears existing cookies before parsing" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const contents = "example.com\tFALSE\t/\tFALSE\t0\tonly\t1\n";
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = PATH, .data = contents });
+
+    var jar = CookieJar.init(std.testing.allocator);
+    defer jar.deinit();
+
+    const uri = try std.Uri.parse("https://example.com/");
+    try jar.addCookie(std.testing.io, uri, "stale=1");
+    try std.testing.expectEqual(@as(usize, 1), jar.cookies.items.len);
+
+    try jar.readFile(std.testing.io, tmp.dir);
+    try std.testing.expectEqual(@as(usize, 1), jar.cookies.items.len);
+    try std.testing.expectEqualStrings("only", jar.cookies.items[0].name);
+}
+
+test "readFile returns InvalidFormat on malformed lines" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = PATH, .data = "not-enough-fields\n" });
+
+    var jar = CookieJar.init(std.testing.allocator);
+    defer jar.deinit();
+
+    try std.testing.expectError(error.InvalidFormat, jar.readFile(std.testing.io, tmp.dir));
+}
+
+test "writeFile writes the Netscape header and a line per cookie" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var jar = CookieJar.init(std.testing.allocator);
+    defer jar.deinit();
+
+    const uri = try std.Uri.parse("https://example.com/");
+    try jar.addCookie(std.testing.io, uri, "a=1");
+
+    try jar.writeFile(std.testing.io, tmp.dir);
+
+    const written = try tmp.dir.readFileAlloc(std.testing.io, PATH, std.testing.allocator, .unlimited);
+    defer std.testing.allocator.free(written);
+
+    try std.testing.expect(std.mem.startsWith(u8, written, FILE_HEADER));
+    try std.testing.expect(std.mem.endsWith(u8, written, "example.com\tFALSE\t/\tFALSE\t0\ta\t1\n"));
+}
+
+test "writeFile then readFile round trips cookies" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const uri = try std.Uri.parse("https://example.com/api");
+    {
+        var jar = CookieJar.init(std.testing.allocator);
+        defer jar.deinit();
+
+        try jar.addCookie(std.testing.io, uri, "session=abc; Path=/api; Secure");
+        try jar.addCookie(std.testing.io, uri, "theme=light");
+        try jar.writeFile(std.testing.io, tmp.dir);
+    }
+
+    var jar = CookieJar.init(std.testing.allocator);
+    defer jar.deinit();
+    try jar.readFile(std.testing.io, tmp.dir);
+
+    try std.testing.expectEqual(@as(usize, 2), jar.cookies.items.len);
+    try std.testing.expectEqualStrings("session", jar.cookies.items[0].name);
+    try std.testing.expectEqualStrings("abc", jar.cookies.items[0].value);
+    try std.testing.expectEqualStrings("/api", jar.cookies.items[0].path);
+    try std.testing.expect(jar.cookies.items[0].secure);
+    try std.testing.expectEqualStrings("theme", jar.cookies.items[1].name);
+    try std.testing.expectEqualStrings("light", jar.cookies.items[1].value);
+    try std.testing.expectEqualStrings("/", jar.cookies.items[1].path);
+    try std.testing.expect(!jar.cookies.items[1].secure);
+}
+
+test "writeFile replaces an existing cookie file" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = PATH, .data = "stale contents that should be overwritten\n" });
+
+    var jar = CookieJar.init(std.testing.allocator);
+    defer jar.deinit();
+
+    const uri = try std.Uri.parse("https://example.com/");
+    try jar.addCookie(std.testing.io, uri, "fresh=1");
+    try jar.writeFile(std.testing.io, tmp.dir);
+
+    const written = try tmp.dir.readFileAlloc(std.testing.io, PATH, std.testing.allocator, .unlimited);
+    defer std.testing.allocator.free(written);
+
+    try std.testing.expect(std.mem.indexOf(u8, written, "stale contents") == null);
+    try std.testing.expect(std.mem.indexOf(u8, written, "\tfresh\t1\n") != null);
+}
+
+test "writeFile on an empty jar produces only the header" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var jar = CookieJar.init(std.testing.allocator);
+    defer jar.deinit();
+
+    try jar.writeFile(std.testing.io, tmp.dir);
+
+    const written = try tmp.dir.readFileAlloc(std.testing.io, PATH, std.testing.allocator, .unlimited);
+    defer std.testing.allocator.free(written);
+
+    try std.testing.expectEqualStrings(FILE_HEADER ++ "\n", written);
+}
