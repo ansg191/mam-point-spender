@@ -25,6 +25,10 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    const clap = b.dependency("clap", .{
+        .target = target,
+        .optimize = optimize,
+    });
 
     // This creates a module, which represents a collection of source files alongside
     // some compilation options, such as optimization mode and linked system libraries.
@@ -87,6 +91,7 @@ pub fn build(b: *std.Build) void {
                 // importing modules from different packages).
                 .{ .name = "mam_point_spender", .module = mod },
                 .{ .name = "zeit", .module = zeit.module("zeit") },
+                .{ .name = "clap", .module = clap.module("clap") },
             },
         }),
     });

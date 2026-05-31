@@ -1,6 +1,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
+const clap = @import("clap");
 const zeit = @import("zeit");
 
 const mam_point_spender = @import("mam_point_spender");
@@ -10,8 +11,46 @@ pub fn main(init: std.process.Init) !void {
     const gpa = init.gpa;
     const io = init.io;
 
+    const params = comptime clap.parseParamsComptime(
+        \\-h, --help            Display this help and exit.
+        \\-b, --buffer <u32>    Buffer points to preserve (default: $MAM_BUFFER).
+        \\--vip                 Maximize VIP before purchasing upload (default: $MAM_VIP).
+        \\--no-vip              Do not maximize VIP, only purchase upload (overrides --vip).
+    );
+
+    var diag = clap.Diagnostic{};
+    var res = clap.parse(clap.Help, &params, clap.parsers.default, init.minimal.args, .{
+        .diagnostic = &diag,
+        .allocator = gpa,
+    }) catch |err| {
+        try diag.reportToFile(io, .stderr(), err);
+        return err;
+    };
+    defer res.deinit();
+
+    if (res.args.help != 0) {
+        const exec = std.fs.path.basename(res.exe_arg orelse "mam-point-spender");
+        std.debug.print("Usage: {s} ", .{exec});
+        try clap.usageToFile(io, .stderr(), clap.Help, &params);
+        std.debug.print("\n\n", .{});
+        try clap.helpToFile(io, .stderr(), clap.Help, &params, .{});
+        return;
+    }
+
     // Load config
-    const cfg: mam_point_spender.Config = try .init(init.environ_map);
+    var cfg: mam_point_spender.Config = try .init(init.environ_map);
+
+    // Process command-line overrides
+    if (res.args.buffer) |b| {
+        cfg.buffer = b;
+    }
+    if (res.args.vip != 0) {
+        cfg.vip = true;
+    }
+    if (res.args.@"no-vip" != 0) {
+        cfg.vip = false;
+    }
+
     std.log.info("Buffer: {d}", .{cfg.buffer});
     std.log.info("VIP: {}", .{cfg.vip});
 

@@ -36,6 +36,10 @@
             .url = "git+https://github.com/rockorager/zeit?ref=v0.8.0#0ad98ccc1563f1722cc42e0dffdc8b4b41e3b44f",
             .hash = "zeit-0.6.0-5I6bk2m9AgA9ipDnz5NtOaXfPmZs2oo0ef6l0SqBrcIa",
         },
+        .clap = .{
+            .url = "https://github.com/Hejsil/zig-clap/archive/refs/tags/0.12.0.tar.gz",
+            .hash = "clap-0.12.0-oBajB7foAQDqlSwaSG5g0yq7xGbQARUsBk5T64gAOqP5",
+        },
     },
     .paths = .{
         "build.zig",
