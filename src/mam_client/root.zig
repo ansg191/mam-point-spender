@@ -8,11 +8,13 @@ const CookieJar = @import("../cookie_jar.zig");
 const types = @import("types.zig");
 pub const SnatchSummary = types.SnatchSummary;
 pub const UserInfo = types.UserInfo;
+const options = @import("build_options");
 
 cookie_jar: *CookieJar,
 client: http.Client,
 
-const USER_AGENT = "mam-point-spender/0.1";
+const VERSION = options.version;
+const USER_AGENT = "mam-point-spender/" ++ VERSION;
 const MAM_BASE_URL = "https://www.myanonamouse.net/";
 const MAM_SNATCH_SUMMARY_URL = MAM_BASE_URL ++ "jsonLoad.php?snatch_summary";
 const MAM_USER_INFO_URL = MAM_BASE_URL ++ "jsonLoad.php?id={d}";

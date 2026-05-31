@@ -96,6 +96,12 @@ pub fn build(b: *std.Build) void {
     // loader command". Ignored by non-Mach-O linkers.
     exe.headerpad_size = 0x1000;
 
+    // Add version information to the executable.
+    const version = gitVersion(b);
+    const options = b.addOptions();
+    options.addOption([]const u8, "version", version);
+    mod.addOptions("build_options", options);
+
     // This declares intent for the executable to be installed into the
     // install prefix when running `zig build` (i.e. when executing the default
     // step). By default the install prefix is `zig-out/` but can be overridden
@@ -166,4 +172,9 @@ pub fn build(b: *std.Build) void {
     //
     // Lastly, the Zig build system is relatively simple and self-contained,
     // and reading its source code will allow you to master it.
+}
+
+fn gitVersion(b: *std.Build) []const u8 {
+    const result = b.run(&.{ "git", "describe", "--tags", "--always", "--dirty" });
+    return std.mem.trimEnd(u8, result, "\n\r ");
 }
