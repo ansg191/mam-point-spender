@@ -6,19 +6,58 @@ on:
       - main
   pull_request:
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   test:
-    runs-on: ubuntu-latest
+    name: test (${{ matrix.name }})
+    runs-on: ${{ matrix.runs-on }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Native runners
+          - { name: x86_64-linux,         runs-on: ubuntu-latest,     flags: '' }
+          - { name: aarch64-linux,        runs-on: ubuntu-24.04-arm,  flags: '' }
+          - { name: x86_64-windows,       runs-on: windows-latest,    flags: '' }
+          # Zig segfaults on windows-arm, but we can check that it builds at least
+          # See: https://codeberg.org/ziglang/zig/issues/31865
+          - { name: aarch64-windows,      runs-on: ubuntu-latest,     flags: '-Dtarget=aarch64-windows',  build_only: true }
+          # x86_64 MacOS runners are being deprecated, but we can check that it builds at least
+          - { name: x86_64-macos,         runs-on: macos-latest,      flags: '-Dtarget=x86_64-macos',     build_only: true }
+          - { name: aarch64-macos,        runs-on: macos-latest,      flags: '' }
+          # Cross-compiled, run under qemu-user
+          - { name: arm-linux-musleabihf, runs-on: ubuntu-latest, qemu: true, flags: '-Dtarget=arm-linux-musleabihf -fqemu' }
+          - { name: riscv64-linux,        runs-on: ubuntu-latest, qemu: true, flags: '-Dtarget=riscv64-linux -fqemu' }
+          - { name: riscv32-linux,        runs-on: ubuntu-latest, qemu: true, flags: '-Dtarget=riscv32-linux -fqemu' }
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6.0.2
         with:
           fetch-depth: 0
 
       - name: Set up Zig
-        uses: mlugg/setup-zig@v2
+        uses: mlugg/setup-zig@v2.2.1
         with:
           version: 0.16.0
 
+      - name: Install qemu-user-static
+        if: matrix.qemu
+        run: sudo apt-get update && sudo apt-get install -y qemu-user-static
+
+      - name: Run build
+        if: matrix.build_only
+        shell: bash
+        run: zig build --summary all ${{ matrix.flags }}
+
       - name: Run tests
-        run: zig build test --summary all
+        if: ${{ !matrix.build_only }}
+        shell: bash
+        run: |
+          zig build test --summary all ${{ matrix.flags }}
