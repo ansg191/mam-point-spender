@@ -18,7 +18,7 @@ pub fn main(init: std.process.Init) !void {
     // Setup cookie jar
     var cookie_jar = mam_point_spender.CookieJar.init(gpa);
     defer cookie_jar.deinit();
-    defer cookie_jar.writeFile(io) catch |e| {
+    defer cookie_jar.writeFile(io, Io.Dir.cwd()) catch |e| {
         std.log.err("Failed to write cookie jar: {}", .{e});
     };
 
@@ -27,7 +27,7 @@ pub fn main(init: std.process.Init) !void {
     defer client.deinit();
 
     // Load cookies
-    try cookie_jar.readFile(io);
+    try cookie_jar.readFile(io, Io.Dir.cwd());
 
     // Get MAM UID
     const user_info = try getUserInfo(gpa, &client, cfg.mam_id);
@@ -82,7 +82,7 @@ fn maximizeVip(gpa: Allocator, io: Io, client: *MamClient, ui: *const MamClient.
 
     const remaining_weeks = @as(f64, @floatFromInt(remaining)) / @as(f64, @floatFromInt(SECS_PER_WEEK));
     const eligible_weeks = @as(f64, @floatFromInt(eligible)) / @as(f64, @floatFromInt(SECS_PER_WEEK));
-    std.log.info("VIP expires in {} weeks, we can buy {} weeks of VIP", .{remaining_weeks, eligible_weeks});
+    std.log.info("VIP expires in {} weeks, we can buy {} weeks of VIP", .{ remaining_weeks, eligible_weeks });
 
     if (eligible == 0) {
         std.log.info("VIP is already maxed out, no purchase necessary", .{});
@@ -99,9 +99,9 @@ fn purchasePoints(gpa: Allocator, client: *MamClient, points: u32, buffer: u32) 
     for (GB_AMOUNTS) |gb| {
         std.log.info("Checking whether to spend {}GB", .{gb});
         const cost = gb * POINTS_PER_GB;
-        std.log.info("Cost for {}GB: {d} points (buffer: {d})", .{gb, cost, buffer});
+        std.log.info("Cost for {}GB: {d} points (buffer: {d})", .{ gb, cost, buffer });
         if (points >= (cost + buffer)) {
-            std.log.info("Purchasing {}GB for {d} points", .{gb, cost});
+            std.log.info("Purchasing {}GB for {d} points", .{ gb, cost });
             try client.buyGb(gpa, gb, .default);
         }
     }

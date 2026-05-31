@@ -70,11 +70,11 @@ pub fn deinit(self: *CookieJar) void {
 // Reads cookies from the file, replacing any existing cookies in the jar.
 // If the file does not exist, this will just leave the jar empty.
 // If the file is malformed, this will return an error.
-pub fn readFile(self: *CookieJar, io: Io) !void {
+pub fn readFile(self: *CookieJar, io: Io, dir: Io.Dir) !void {
     self.cookies.clearAndFree(self.arena.allocator());
     _ = self.arena.reset(.retain_capacity);
 
-    var file = Io.Dir.cwd().openFile(io, PATH, .{
+    var file = dir.openFile(io, PATH, .{
         .mode = .read_only,
         .allow_directory = false,
     }) catch |err| switch (err) {
@@ -102,8 +102,8 @@ pub const WriteFileError = Io.Dir.CreateFileAtomicError || Io.Writer.Error || Io
 // Writes the current cookies to the file, replacing any existing file.
 // This will create the file if it does not exist, and will overwrite it if it does.
 // If there is an error writing the file, this will return an error and the existing file will remain unchanged.
-pub fn writeFile(self: *const CookieJar, io: Io) WriteFileError!void {
-    var af = try Io.Dir.cwd().createFileAtomic(io, PATH, .{ .replace = true });
+pub fn writeFile(self: *const CookieJar, io: Io, dir: Io.Dir) WriteFileError!void {
+    var af = try dir.createFileAtomic(io, PATH, .{ .replace = true });
     defer af.deinit(io);
 
     var buf: [4096]u8 = undefined;
