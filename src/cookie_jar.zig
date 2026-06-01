@@ -244,7 +244,7 @@ pub fn addCookie(self: *CookieJar, io: Io, uri: std.Uri, header: []const u8) Add
                     return;
                 }
                 const now = Io.Clock.real.now(io).toSeconds();
-                cookie.expires_at = now + max_age;
+                cookie.expires_at = now +| max_age;
             },
             .Path => {
                 cookie.path = val;

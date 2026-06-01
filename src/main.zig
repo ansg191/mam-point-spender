@@ -138,7 +138,7 @@ fn maximizeVip(gpa: Allocator, io: Io, client: *MamClient, ui: *const MamClient.
     const SECS_PER_WEEK = 7 * 24 * 3600;
     const max_vip_duration = 128 * SECS_PER_WEEK / 10;
     const min_purchase_duration = SECS_PER_WEEK;
-    const remaining = @max(0, expiry - now);
+    const remaining = @max(0, expiry -| now);
     const available = max_vip_duration - remaining;
     const eligible = if (available >= min_purchase_duration) available else 0;
 
