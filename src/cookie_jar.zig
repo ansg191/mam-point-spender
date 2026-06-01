@@ -142,9 +142,19 @@ pub fn cookieHeader(self: *const CookieJar, gpa: Allocator, io: Io, uri: std.Uri
     const now = Io.Clock.real.now(io).toSeconds();
     for (self.cookies.items) |cookie| {
         if (cookie.expires_at < now and cookie.expires_at != 0) continue; // Skip expired cookies, but allow session cookies
-        // TODO: handle domain matching properly
-        if (!std.mem.endsWith(u8, host.bytes, cookie.domain)) continue; // Domain does not match
-        if (!cookie.include_subdomains and !std.mem.eql(u8, host.bytes, cookie.domain)) continue; // Subdomain does not match
+
+        // Domain match: exact, or host ends with "." ++ domain.
+        const domain = if (cookie.domain.len > 0 and cookie.domain[0] == '.')
+            cookie.domain[1..]
+        else
+            cookie.domain;
+        const is_exact = std.mem.eql(u8, host.bytes, domain);
+        const is_subdomain = host.bytes.len > domain.len and
+            std.mem.endsWith(u8, host.bytes, domain) and
+            host.bytes[host.bytes.len - domain.len - 1] == '.';
+        if (!is_exact and !is_subdomain) continue; // Domain does not match
+        if (!cookie.include_subdomains and !is_exact) continue; // Subdomain matching disabled
+
         if (!std.mem.startsWith(u8, path, cookie.path)) continue; // Path does not match
         if (cookie.secure and !std.mem.eql(u8, uri.scheme, "https")) continue; // Secure cookie, but not HTTPS
 
@@ -597,6 +607,19 @@ test "cookieHeader omits cookies whose path does not match" {
 
     const root_uri = try std.Uri.parse("https://example.com/");
     const header = try jar.cookieHeader(std.testing.allocator, std.testing.io, root_uri);
+    defer std.testing.allocator.free(header);
+    try std.testing.expectEqualStrings("", header);
+}
+
+test "cookieHeader does not leak cookies to host with matching suffix but no dot boundary" {
+    var jar = CookieJar.init(std.testing.allocator);
+    defer jar.deinit();
+
+    const example_uri = try std.Uri.parse("https://example.com/");
+    try jar.addCookie(std.testing.io, example_uri, "shared=1; Domain=example.com");
+
+    const evil_uri = try std.Uri.parse("https://evilexample.com/");
+    const header = try jar.cookieHeader(std.testing.allocator, std.testing.io, evil_uri);
     defer std.testing.allocator.free(header);
     try std.testing.expectEqualStrings("", header);
 }
