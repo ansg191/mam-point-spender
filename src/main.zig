@@ -98,10 +98,11 @@ pub fn main(init: std.process.Init) !void {
     // Maximize VIP
     if (cfg.vip) {
         try maximizeVip(gpa, io, &client, &user_info.value);
-        user_info.deinit();
 
         // Refresh user info after VIP purchase
-        user_info = try getUserInfo(gpa, &client, cfg.mam_id);
+        const refreshed = try getUserInfo(gpa, &client, cfg.mam_id);
+        user_info.deinit();
+        user_info = refreshed;
     }
 
     // Purchase points
