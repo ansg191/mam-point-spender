@@ -38,7 +38,16 @@ pub fn main(init: std.process.Init) !void {
     }
 
     // Load config
-    var cfg: mam_point_spender.Config = try .init(init.environ_map);
+    var cfg = mam_point_spender.Config.init(init.environ_map) catch |err| switch (err) {
+        mam_point_spender.Config.Error.MissingEnvVar => {
+            std.log.err("Missing required environment variable: MAMID", .{});
+            return err;
+        },
+        else => {
+            std.log.err("Failed to load config: {}", .{err});
+            return err;
+        },
+    };
 
     // Process command-line overrides
     if (res.args.buffer) |b| {

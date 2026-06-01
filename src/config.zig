@@ -16,8 +16,10 @@ const MAM_ID_ENV_VAR = "MAMID";
 const BUFFER_ENV_VAR = "MAM_BUFFER";
 const VIP_ENV_VAR = "MAM_VIP";
 
+pub const Error = std.fmt.ParseIntError || error{ MissingEnvVar, InvalidBoolean };
+
 // Load configuration from the environment
-pub fn init(env: *const std.process.Environ.Map) !Config {
+pub fn init(env: *const std.process.Environ.Map) Error!Config {
     var cfg: Config = .{
         .mam_id = env.get(MAM_ID_ENV_VAR) orelse return error.MissingEnvVar,
     };
