@@ -7,6 +7,8 @@ const zeit = @import("zeit");
 const mam_point_spender = @import("mam_point_spender");
 const MamClient = mam_point_spender.MamClient;
 
+const MAX_BUFFER = 99_999;
+
 pub fn main(init: std.process.Init) !void {
     const gpa = init.gpa;
     const io = init.io;
@@ -62,6 +64,11 @@ pub fn main(init: std.process.Init) !void {
 
     std.log.info("Buffer: {d}", .{cfg.buffer});
     std.log.info("VIP: {}", .{cfg.vip});
+
+    if (cfg.buffer > MAX_BUFFER) {
+        std.log.err("Buffer cannot exceed {d} points", .{MAX_BUFFER});
+        return error.InvalidBuffer;
+    }
 
     // Setup cookie jar
     var cookie_jar = mam_point_spender.CookieJar.init(gpa);
