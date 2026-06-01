@@ -17,6 +17,8 @@ client: http.Client,
 // Should not have a trailing slash, as the client will append paths to it.
 base_url: []const u8 = MAM_BASE_URL,
 
+const MAX_RESPONSE_BYTES = 1024 * 1024; // 1 MiB
+
 const VERSION = options.version;
 const USER_AGENT = "mam-point-spender/" ++ VERSION;
 const MAM_BASE_URL = "https://www.myanonamouse.net";
@@ -74,7 +76,10 @@ fn get(self: *MamClient, gpa: Allocator, uri: std.Uri, cookie_option: CookieOpti
     }
 
     // Extract useful headers
-    const content_length = std.math.cast(usize, response.head.content_length orelse 0) orelse return error.ResponseBodyTooLarge;
+    const content_length = if (response.head.content_length orelse 0 > MAX_RESPONSE_BYTES)
+        return error.ResponseBodyTooLarge
+    else
+        @min(response.head.content_length orelse 0, MAX_RESPONSE_BYTES);
 
     // Handle set-cookie headers
     var header_it = response.head.iterateHeaders();
@@ -89,7 +94,7 @@ fn get(self: *MamClient, gpa: Allocator, uri: std.Uri, cookie_option: CookieOpti
     defer body.deinit();
 
     var reader = response.reader(&transfer_buffer);
-    _ = try reader.stream(&body.writer, .unlimited);
+    _ = try reader.stream(&body.writer, .limited(MAX_RESPONSE_BYTES));
 
     return body.toOwnedSlice();
 }
