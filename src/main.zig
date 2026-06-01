@@ -78,7 +78,7 @@ pub fn main(init: std.process.Init) !void {
     try cookie_jar.readFile(io, Io.Dir.cwd());
 
     // Get MAM UID
-    const user_info = try getUserInfo(gpa, &client, cfg.mam_id);
+    var user_info = try getUserInfo(gpa, &client, cfg.mam_id);
     defer user_info.deinit();
     std.log.info("UID: {}", .{user_info.value.uid});
     std.log.info("Username: {s}", .{user_info.value.username});
@@ -89,7 +89,13 @@ pub fn main(init: std.process.Init) !void {
     // TODO: Wedge buying
 
     // Maximize VIP
-    try maximizeVip(gpa, io, &client, &user_info.value);
+    if (cfg.vip) {
+        try maximizeVip(gpa, io, &client, &user_info.value);
+        user_info.deinit();
+
+        // Refresh user info after VIP purchase
+        user_info = try getUserInfo(gpa, &client, cfg.mam_id);
+    }
 
     // Purchase points
     try purchasePoints(gpa, &client, user_info.value.seedbonus, cfg.buffer);
@@ -144,13 +150,15 @@ fn maximizeVip(gpa: Allocator, io: Io, client: *MamClient, ui: *const MamClient.
 fn purchasePoints(gpa: Allocator, client: *MamClient, points: u32, buffer: u32) !void {
     const POINTS_PER_GB = 500;
     const GB_AMOUNTS = [_]u32{ 100, 50 };
+    var pts = points;
     for (GB_AMOUNTS) |gb| {
         std.log.info("Checking whether to spend {}GB", .{gb});
         const cost = gb * POINTS_PER_GB;
         std.log.info("Cost for {}GB: {d} points (buffer: {d})", .{ gb, cost, buffer });
-        if (points >= (cost + buffer)) {
+        if (pts >= (cost + buffer)) {
             std.log.info("Purchasing {}GB for {d} points", .{ gb, cost });
             try client.buyGb(gpa, gb, .default);
+            pts -= cost;
         }
     }
 }
