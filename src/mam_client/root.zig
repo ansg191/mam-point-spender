@@ -69,7 +69,7 @@ fn get(self: *MamClient, gpa: Allocator, uri: std.Uri, cookie_option: CookieOpti
 
     // Check status
     if (response.head.status.class() != .success) {
-        std.log.err("Failed to fetch snatch summary: HTTP {d}", .{response.head.status});
+        std.log.err("Failed to GET {}: HTTP {d}", .{ uri, response.head.status });
         return error.BadResponseStatus;
     }
 
