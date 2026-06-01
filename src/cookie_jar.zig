@@ -189,9 +189,10 @@ pub fn addCookie(self: *CookieJar, io: Io, uri: std.Uri, header: []const u8) Add
     var parts = std.mem.splitScalar(u8, h, ';');
 
     // Extract name and value from the first part
-    var name_value = std.mem.splitScalar(u8, parts.next() orelse return error.InvalidFormat, '=');
-    const name = name_value.next() orelse return error.InvalidFormat;
-    const value = name_value.next() orelse return error.InvalidFormat;
+    const name_value = parts.next() orelse return error.InvalidFormat;
+    const split = std.mem.findScalar(u8, name_value, '=') orelse return error.InvalidFormat;
+    const name = std.mem.trim(u8, name_value[0..split], " ");
+    const value = std.mem.trim(u8, name_value[split + 1 ..], " ");
 
     // Default cookie values
     const host = try uri.getHostAlloc(self.arena.allocator());
@@ -520,6 +521,31 @@ test "addCookie ignores unknown attributes" {
 
     try std.testing.expectEqual(@as(usize, 1), jar.cookies.items.len);
     try std.testing.expectEqualStrings("1", jar.cookies.items[0].value);
+}
+
+test "addCookie handles = in value" {
+    var jar = CookieJar.init(std.testing.allocator);
+    defer jar.deinit();
+
+    const uri = try std.Uri.parse("https://example.com/");
+    try jar.addCookie(std.testing.io, uri, "token=abc==; Path=/");
+
+    try std.testing.expectEqual(@as(usize, 1), jar.cookies.items.len);
+    try std.testing.expectEqualStrings("token", jar.cookies.items[0].name);
+    try std.testing.expectEqualStrings("abc==", jar.cookies.items[0].value);
+}
+
+test "addCookie strips name and value whitespace" {
+    var jar = CookieJar.init(std.testing.allocator);
+    defer jar.deinit();
+
+    const uri = try std.Uri.parse("https://example.com/");
+    try jar.addCookie(std.testing.io, uri, "  name  =  value with spaces  ; Path=/  ");
+
+    try std.testing.expectEqual(@as(usize, 1), jar.cookies.items.len);
+    try std.testing.expectEqualStrings("name", jar.cookies.items[0].name);
+    try std.testing.expectEqualStrings("value with spaces", jar.cookies.items[0].value);
+    try std.testing.expectEqualStrings("/", jar.cookies.items[0].path);
 }
 
 test "cookieHeader omits secure cookies over plain HTTP" {
