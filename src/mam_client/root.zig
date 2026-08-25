@@ -60,10 +60,23 @@ fn get(self: *MamClient, gpa: Allocator, uri: std.Uri, cookie_option: CookieOpti
         .none => {},
     };
 
-    var req = try self.client.request(.GET, uri, .{ .headers = .{ .user_agent = .{ .override = USER_AGENT } }, .extra_headers = &.{
+    var req = try self.client.request(.GET, uri, .{ .headers = .{
+        .user_agent = .{ .override = USER_AGENT },
+        // We never decompress the body (`Response.reader` hands back the raw
+        // transfer bytes), so ask the server not to compress it. Overriding the
+        // header also avoids std's array-driven serialisation, which emits a
+        // malformed `accept-encoding` line when only `identity` is enabled.
+        .accept_encoding = .{ .override = "identity" },
+    }, .extra_headers = &.{
         .{ .name = "Cookie", .value = cookie },
     } });
     defer req.deinit();
+
+    // Belt and braces: if the server compresses anyway, make `receiveHead` fail
+    // with `error.HttpContentEncodingUnsupported` instead of handing back
+    // undecoded bytes that would later fail to parse as JSON.
+    req.accept_encoding = @splat(false);
+    req.accept_encoding[@intFromEnum(http.ContentEncoding.identity)] = true;
 
     try req.sendBodiless();
 
@@ -448,4 +461,58 @@ test "get stores Set-Cookie response headers into the jar" {
     try testing.expectEqual(@as(usize, 1), cookie_jar.cookies.items.len);
     try testing.expectEqualStrings("sid", cookie_jar.cookies.items[0].name);
     try testing.expectEqualStrings("abc123", cookie_jar.cookies.items[0].value);
+}
+
+test "get asks for an uncompressed body" {
+    var recorder: TestServer.RequestRecorder = .{
+        .gpa = testing.allocator,
+        .response_body =
+        \\{"classname":"u","seedbonus":0,"uid":0,"username":"u","vip_until":null,"wedges":0}
+        ,
+    };
+    defer recorder.deinit();
+
+    var ts = try TestServer.start(testing.allocator, &recorder);
+
+    var cookie_jar = CookieJar.init(testing.allocator);
+    defer cookie_jar.deinit();
+
+    var client = makeTestClient(&cookie_jar, ts.base_url);
+    defer client.deinit();
+
+    const parsed = try client.get_snatch_summary(testing.allocator, .none);
+    defer parsed.deinit();
+    try ts.finish(testing.allocator);
+
+    // The body is never decompressed, so compression must never be negotiated.
+    try testing.expect(std.mem.indexOf(u8, recorder.headers.items, "accept-encoding: identity") != null);
+    try testing.expect(std.mem.indexOf(u8, recorder.headers.items, "gzip") == null);
+    try testing.expect(std.mem.indexOf(u8, recorder.headers.items, "deflate") == null);
+}
+
+test "get rejects a compressed response instead of returning raw bytes" {
+    var recorder: TestServer.RequestRecorder = .{
+        .gpa = testing.allocator,
+        .response_extra_headers = &.{
+            .{ .name = "Content-Encoding", .value = "gzip" },
+        },
+        // Not real gzip: the point is that the response is refused before the
+        // body is ever handed to the JSON parser.
+        .response_body = "not actually gzip",
+    };
+    defer recorder.deinit();
+
+    var ts = try TestServer.start(testing.allocator, &recorder);
+
+    var cookie_jar = CookieJar.init(testing.allocator);
+    defer cookie_jar.deinit();
+
+    var client = makeTestClient(&cookie_jar, ts.base_url);
+    defer client.deinit();
+
+    try testing.expectError(
+        error.HttpContentEncodingUnsupported,
+        client.get_snatch_summary(testing.allocator, .none),
+    );
+    try ts.finish(testing.allocator);
 }
