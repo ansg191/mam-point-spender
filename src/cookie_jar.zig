@@ -272,6 +272,22 @@ pub fn addCookie(self: *CookieJar, io: Io, uri: std.Uri, header: []const u8) Add
     try self.cookies.append(self.arena.allocator(), cookie);
 }
 
+test "addCookie copies the host out of the URI text" {
+    var jar = CookieJar.init(std.testing.allocator);
+    defer jar.deinit();
+
+    // `std.Uri.parse` points the host at the text it was given, so scribbling over that
+    // text afterwards must not disturb a cookie that is already in the jar.
+    const url = try std.testing.allocator.dupe(u8, "https://example.com/path");
+    defer std.testing.allocator.free(url);
+    const uri = try std.Uri.parse(url);
+    try jar.addCookie(std.testing.io, uri, "sessionId=abc123; Path=/");
+    @memset(url, 'x');
+
+    try std.testing.expectEqual(@as(usize, 1), jar.cookies.items.len);
+    try std.testing.expectEqualStrings("example.com", jar.cookies.items[0].domain);
+}
+
 test "addCookie" {
     var jar = CookieJar.init(std.testing.allocator);
     defer jar.deinit();
