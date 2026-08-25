@@ -8,6 +8,7 @@ const mam_point_spender = @import("mam_point_spender");
 const MamClient = mam_point_spender.MamClient;
 
 const MAX_BUFFER = 99_999;
+const SECS_PER_WEEK = 7 * 24 * 3600;
 
 // Cap on how much of a rejected server-supplied vip_until value is echoed into the log.
 const MAX_LOGGED_VIP_UNTIL = 64;
@@ -76,6 +77,12 @@ pub fn main(init: std.process.Init) !void {
     // Setup cookie jar
     var cookie_jar = mam_point_spender.CookieJar.init(gpa);
     defer cookie_jar.deinit();
+
+    // Load cookies before arming the write-back defer: if the read fails the jar
+    // is empty or only partially filled, and writing it back would destroy the
+    // existing cookie file.
+    try cookie_jar.readFile(io, Io.Dir.cwd());
+
     defer cookie_jar.writeFile(io, Io.Dir.cwd()) catch |e| {
         std.log.err("Failed to write cookie jar: {}", .{e});
     };
@@ -83,9 +90,6 @@ pub fn main(init: std.process.Init) !void {
     // Setup client
     var client: MamClient = .{ .cookie_jar = &cookie_jar, .client = .{ .allocator = gpa, .io = io } };
     defer client.deinit();
-
-    // Load cookies
-    try cookie_jar.readFile(io, Io.Dir.cwd());
 
     // Get MAM UID
     var user_info = try getUserInfo(gpa, &client, cfg.mam_id);
@@ -149,14 +153,11 @@ fn maximizeVip(gpa: Allocator, io: Io, client: *MamClient, ui: *const MamClient.
 
     const now = Io.Clock.real.now(io).toSeconds();
 
-    // VIP has a max duration of 12.8 weeks
-    // Calculate how much VIP time we can buy without wasting points
-    const SECS_PER_WEEK = 7 * 24 * 3600;
-    const max_vip_duration = 128 * SECS_PER_WEEK / 10;
-    const min_purchase_duration = SECS_PER_WEEK;
-    const remaining = @max(0, expiry -| now);
-    const available = max_vip_duration - remaining;
-    const eligible = if (available >= min_purchase_duration) available else 0;
+    // Keep this signed: `@max` narrows its result type to the smallest integer
+    // type covering the possible range, so `@max(0, expiry -| now)` yields a
+    // `u63` and every subtraction derived from it would be unsigned.
+    const remaining: i64 = @max(0, expiry -| now);
+    const eligible = eligibleVipDuration(remaining);
 
     const remaining_weeks = @as(f64, @floatFromInt(remaining)) / @as(f64, @floatFromInt(SECS_PER_WEEK));
     const eligible_weeks = @as(f64, @floatFromInt(eligible)) / @as(f64, @floatFromInt(SECS_PER_WEEK));
@@ -170,6 +171,19 @@ fn maximizeVip(gpa: Allocator, io: Io, client: *MamClient, ui: *const MamClient.
     std.log.info("Attempting to max out VIP", .{});
     try client.buyVip(gpa, .default);
 }
+
+/// Calculate how much VIP time we can buy without wasting points, given how
+/// many seconds of VIP time are left.
+///
+/// `remaining` can exceed the cap when MAM reports an expiry far in the future,
+/// so the arithmetic has to be signed: an unsigned subtraction would underflow
+/// and report a nonsensical amount of eligible time.
+fn eligibleVipDuration(remaining: i64) i64 {
+    // VIP has a max duration of 12.8 weeks
+    const max_vip_duration = 128 * SECS_PER_WEEK / 10;
+    const min_purchase_duration = SECS_PER_WEEK;
+    const available: i64 = max_vip_duration - remaining;
+    return if (available >= min_purchase_duration) available else 0;
 
 // Parses a VIP expiry timestamp into a unix timestamp.
 //
@@ -223,6 +237,32 @@ fn purchasePoints(gpa: Allocator, client: *MamClient, points: u32, buffer: u32) 
         }
     }
 }
+
+// =============================================================================
+// TESTS
+// =============================================================================
+
+test "eligibleVipDuration offers the full cap when VIP has lapsed" {
+    try std.testing.expectEqual(@as(i64, 128 * SECS_PER_WEEK / 10), eligibleVipDuration(0));
+}
+
+test "eligibleVipDuration subtracts the time already banked" {
+    try std.testing.expectEqual(
+        @as(i64, 128 * SECS_PER_WEEK / 10 - SECS_PER_WEEK),
+        eligibleVipDuration(SECS_PER_WEEK),
+    );
+}
+
+test "eligibleVipDuration returns 0 below the minimum purchase" {
+    const remaining = 128 * SECS_PER_WEEK / 10 - SECS_PER_WEEK + 1;
+    try std.testing.expectEqual(@as(i64, 0), eligibleVipDuration(remaining));
+}
+
+test "eligibleVipDuration returns 0 when VIP outlasts the cap" {
+    // An expiry well past the 12.8 week cap used to underflow and report
+    // ~2^63 seconds of eligible time, triggering a wasted purchase.
+    try std.testing.expectEqual(@as(i64, 0), eligibleVipDuration(52 * SECS_PER_WEEK));
+    try std.testing.expectEqual(@as(i64, 0), eligibleVipDuration(std.math.maxInt(i64)));
 
 test "parseVipExpiry parses MAM timestamps" {
     try std.testing.expectEqual(@as(i64, 1796126400), try parseVipExpiry("2026-12-01 12:00:00"));
