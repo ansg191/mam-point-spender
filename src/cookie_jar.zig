@@ -207,7 +207,10 @@ pub fn addCookie(self: *CookieJar, io: Io, uri: std.Uri, header: []const u8) Add
     // Default cookie values
     const host = try uri.getHostAlloc(self.arena.allocator());
     var cookie: Cookie = .{
-        .domain = host.bytes,
+        // `getHostAlloc` only allocates when the host needs percent-decoding, otherwise it
+        // borrows from the URI text, which the caller frees once the request completes, so
+        // copy it into the arena to give the cookie ownership of its domain.
+        .domain = try self.arena.allocator().dupe(u8, host.bytes),
         .include_subdomains = false,
         .path = "/",
         .secure = false,
@@ -239,7 +242,10 @@ pub fn addCookie(self: *CookieJar, io: Io, uri: std.Uri, header: []const u8) Add
                     host.bytes[host.bytes.len - domain.len - 1] == '.';
                 if (!is_exact and !is_parent) return;
 
-                cookie.domain = val;
+                // Host names are case-insensitive, but `cookieHeader` matches them with
+                // `std.mem.eql`/`endsWith`, so store a lowercased copy. Otherwise a
+                // mixed-case Domain would be accepted here and then never match.
+                cookie.domain = try std.ascii.allocLowerString(self.arena.allocator(), val);
                 cookie.include_subdomains = true;
             },
             .Expires => {
@@ -473,7 +479,8 @@ test "addCookie accepts a Domain that is a parent of the request host" {
 
     try std.testing.expectEqual(@as(usize, 2), jar.cookies.items.len);
     try std.testing.expectEqualStrings("example.com", jar.cookies.items[0].domain);
-    try std.testing.expectEqualStrings("SUB.Example.com", jar.cookies.items[1].domain);
+    // Stored lowercased, so it still matches the host in `cookieHeader`.
+    try std.testing.expectEqualStrings("sub.example.com", jar.cookies.items[1].domain);
 }
 
 test "addCookie rejects a Domain the request host does not belong to" {
