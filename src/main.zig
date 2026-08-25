@@ -134,7 +134,8 @@ fn maximizeVip(gpa: Allocator, io: Io, client: *MamClient, ui: *const MamClient.
 
     const now = Io.Clock.real.now(io).toSeconds();
 
-    // Keep this signed: `@max` narrows its result type, so `@max(0, i64)` is a
+    // Keep this signed: `@max` narrows its result type to the smallest integer
+    // type covering the possible range, so `@max(0, expiry -| now)` yields a
     // `u63` and every subtraction derived from it would be unsigned.
     const remaining: i64 = @max(0, expiry -| now);
     const eligible = eligibleVipDuration(remaining);
