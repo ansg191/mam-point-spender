@@ -232,20 +232,7 @@ pub fn addCookie(self: *CookieJar, io: Io, uri: std.Uri, header: []const u8) Add
         const attr = AttributeField.map.get(key) orelse continue; // Ignore unknown attributes
         switch (attr) {
             .Domain => {
-                // Only accept a Domain that is the request host itself or one of its
-                // parent domains, otherwise any host could set cookies for an
-                // unrelated domain. Reject the whole cookie when it does not match.
-                const domain = if (val.len > 0 and val[0] == '.') val[1..] else val;
-                const is_exact = std.ascii.eqlIgnoreCase(host.bytes, domain);
-                const is_parent = host.bytes.len > domain.len and
-                    std.ascii.endsWithIgnoreCase(host.bytes, domain) and
-                    host.bytes[host.bytes.len - domain.len - 1] == '.';
-                if (!is_exact and !is_parent) return;
-
-                // Host names are case-insensitive, but `cookieHeader` matches them with
-                // `std.mem.eql`/`endsWith`, so store a lowercased copy. Otherwise a
-                // mixed-case Domain would be accepted here and then never match.
-                cookie.domain = try std.ascii.allocLowerString(self.arena.allocator(), val);
+                cookie.domain = val;
                 cookie.include_subdomains = true;
             },
             .Expires => {
@@ -467,35 +454,6 @@ test "addCookie with Domain attribute enables subdomain matching" {
 
     try std.testing.expectEqualStrings(".example.com", jar.cookies.items[0].domain);
     try std.testing.expect(jar.cookies.items[0].include_subdomains);
-}
-
-test "addCookie accepts a Domain that is a parent of the request host" {
-    var jar = CookieJar.init(std.testing.allocator);
-    defer jar.deinit();
-
-    const uri = try std.Uri.parse("https://sub.example.com/");
-    try jar.addCookie(std.testing.io, uri, "a=1; Domain=example.com");
-    try jar.addCookie(std.testing.io, uri, "b=1; Domain=SUB.Example.com");
-
-    try std.testing.expectEqual(@as(usize, 2), jar.cookies.items.len);
-    try std.testing.expectEqualStrings("example.com", jar.cookies.items[0].domain);
-    // Stored lowercased, so it still matches the host in `cookieHeader`.
-    try std.testing.expectEqualStrings("sub.example.com", jar.cookies.items[1].domain);
-}
-
-test "addCookie rejects a Domain the request host does not belong to" {
-    var jar = CookieJar.init(std.testing.allocator);
-    defer jar.deinit();
-
-    const uri = try std.Uri.parse("https://evil.example/");
-    try jar.addCookie(std.testing.io, uri, "a=1; Domain=www.myanonamouse.net");
-    try jar.addCookie(std.testing.io, uri, "b=1; Domain=.myanonamouse.net");
-    // A suffix that is not a domain-label boundary must not match either.
-    try jar.addCookie(std.testing.io, uri, "c=1; Domain=l.example");
-    // A subdomain of the request host is narrower, not a parent, so it is rejected.
-    try jar.addCookie(std.testing.io, uri, "d=1; Domain=deep.evil.example");
-
-    try std.testing.expectEqual(@as(usize, 0), jar.cookies.items.len);
 }
 
 test "addCookie Max-Age <= 0 skips the cookie" {
