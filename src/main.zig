@@ -73,6 +73,12 @@ pub fn main(init: std.process.Init) !void {
     // Setup cookie jar
     var cookie_jar = mam_point_spender.CookieJar.init(gpa);
     defer cookie_jar.deinit();
+
+    // Load cookies before arming the write-back defer: if the read fails the jar
+    // is empty or only partially filled, and writing it back would destroy the
+    // existing cookie file.
+    try cookie_jar.readFile(io, Io.Dir.cwd());
+
     defer cookie_jar.writeFile(io, Io.Dir.cwd()) catch |e| {
         std.log.err("Failed to write cookie jar: {}", .{e});
     };
@@ -80,9 +86,6 @@ pub fn main(init: std.process.Init) !void {
     // Setup client
     var client: MamClient = .{ .cookie_jar = &cookie_jar, .client = .{ .allocator = gpa, .io = io } };
     defer client.deinit();
-
-    // Load cookies
-    try cookie_jar.readFile(io, Io.Dir.cwd());
 
     // Get MAM UID
     var user_info = try getUserInfo(gpa, &client, cfg.mam_id);
