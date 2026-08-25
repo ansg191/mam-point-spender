@@ -46,7 +46,6 @@ pub const RequestError = CookieJar.CookieHeaderError ||
     error{ BadResponseStatus, ResponseBodyTooLarge };
 
 fn get(self: *MamClient, gpa: Allocator, uri: std.Uri, cookie_option: CookieOption) RequestError![]const u8 {
-    var redirect_buffer: [8 * 1024]u8 = undefined;
     var transfer_buffer: [8 * 1024]u8 = undefined;
 
     const cookie = switch (cookie_option) {
@@ -60,14 +59,22 @@ fn get(self: *MamClient, gpa: Allocator, uri: std.Uri, cookie_option: CookieOpti
         .none => {},
     };
 
-    var req = try self.client.request(.GET, uri, .{ .headers = .{ .user_agent = .{ .override = USER_AGENT } }, .extra_headers = &.{
-        .{ .name = "Cookie", .value = cookie },
-    } });
+    // These are JSON API endpoints that should never redirect. `extra_headers` are
+    // kept by std when following a redirect to a different domain, so a redirect
+    // would resend the session cookie (or the raw mam_id) verbatim to the new host.
+    var req = try self.client.request(.GET, uri, .{
+        .headers = .{ .user_agent = .{ .override = USER_AGENT } },
+        .redirect_behavior = .not_allowed,
+        .extra_headers = &.{
+            .{ .name = "Cookie", .value = cookie },
+        },
+    });
     defer req.deinit();
 
     try req.sendBodiless();
 
-    var response = try req.receiveHead(&redirect_buffer);
+    // No redirects are handled, so no redirect buffer is needed.
+    var response = try req.receiveHead(&.{});
 
     // Check status
     if (response.head.status.class() != .success) {
@@ -448,4 +455,34 @@ test "get stores Set-Cookie response headers into the jar" {
     try testing.expectEqual(@as(usize, 1), cookie_jar.cookies.items.len);
     try testing.expectEqualStrings("sid", cookie_jar.cookies.items[0].name);
     try testing.expectEqualStrings("abc123", cookie_jar.cookies.items[0].value);
+}
+
+test "get refuses to follow redirects instead of resending the cookie" {
+    var recorder: TestServer.RequestRecorder = .{
+        .gpa = testing.allocator,
+        .response_status = .found,
+        // Loopback, and deliberately a port nothing listens on: if redirect handling ever
+        // regressed, the test must fail rather than make a real outbound connection.
+        .response_extra_headers = &.{
+            .{ .name = "Location", .value = "http://127.0.0.1:9/jsonLoad.php?snatch_summary" },
+        },
+    };
+    defer recorder.deinit();
+
+    var ts = try TestServer.start(testing.allocator, &recorder);
+
+    var cookie_jar = CookieJar.init(testing.allocator);
+    defer cookie_jar.deinit();
+
+    var client = makeTestClient(&cookie_jar, ts.base_url);
+    defer client.deinit();
+
+    try testing.expectError(
+        error.TooManyHttpRedirects,
+        client.get_snatch_summary(testing.allocator, .{ .override = "mam_id=secret-token" }),
+    );
+    try ts.finish(testing.allocator);
+
+    // The cookie was sent to the original host only; the redirect target is never contacted.
+    try testing.expect(std.mem.indexOf(u8, recorder.headers.items, "Cookie: mam_id=secret-token") != null);
 }
