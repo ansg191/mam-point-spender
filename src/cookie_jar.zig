@@ -155,7 +155,7 @@ pub fn cookieHeader(self: *const CookieJar, gpa: Allocator, io: Io, uri: std.Uri
         if (!is_exact and !is_subdomain) continue; // Domain does not match
         if (!cookie.include_subdomains and !is_exact) continue; // Subdomain matching disabled
 
-        if (!std.mem.startsWith(u8, path, cookie.path)) continue; // Path does not match
+        if (!pathMatches(path, cookie.path)) continue; // Path does not match
         if (cookie.secure and !std.mem.eql(u8, uri.scheme, "https")) continue; // Secure cookie, but not HTTPS
 
         if (header.items.len > 0) {
@@ -167,6 +167,20 @@ pub fn cookieHeader(self: *const CookieJar, gpa: Allocator, io: Io, uri: std.Uri
     }
 
     return header.toOwnedSlice(gpa);
+}
+
+// Path match per RFC 6265 section 5.1.4: the request path must either equal the cookie path,
+// or be an extension of it that starts a new "/" segment. A bare prefix test is not enough,
+// otherwise a cookie scoped to "/json" would also be sent to "/jsonLoad.php".
+fn pathMatches(request_path: []const u8, cookie_path: []const u8) bool {
+    // An empty or relative cookie path falls back to the default path, which is "/" here and matches everything.
+    if (cookie_path.len == 0 or cookie_path[0] != '/') return true;
+    if (std.mem.eql(u8, request_path, cookie_path)) return true;
+    if (!std.mem.startsWith(u8, request_path, cookie_path)) return false;
+    if (cookie_path[cookie_path.len - 1] == '/') return true;
+    // The prefix matched, so require the remainder to begin a new segment.
+    // The length check keeps the index in bounds even though the equality check above already covers it.
+    return request_path.len > cookie_path.len and request_path[cookie_path.len] == '/';
 }
 
 const AttributeField = enum {
@@ -247,7 +261,9 @@ pub fn addCookie(self: *CookieJar, io: Io, uri: std.Uri, header: []const u8) Add
                 cookie.expires_at = now +| max_age;
             },
             .Path => {
-                cookie.path = val;
+                // RFC 6265 section 5.2.4: an empty or relative Path attribute falls back to the
+                // default path, which `cookie.path` already holds. Only an absolute path overrides it.
+                if (val.len > 0 and val[0] == '/') cookie.path = val;
             },
             .Secure => {
                 cookie.secure = true;
@@ -514,6 +530,19 @@ test "addCookie keeps cookies with the same name but different path" {
     try std.testing.expectEqual(@as(usize, 2), jar.cookies.items.len);
 }
 
+test "addCookie falls back to the default path for an empty or relative Path" {
+    var jar = CookieJar.init(std.testing.allocator);
+    defer jar.deinit();
+
+    const uri = try std.Uri.parse("https://example.com/api/v1");
+    try jar.addCookie(std.testing.io, uri, "a=1; Path=");
+    try jar.addCookie(std.testing.io, uri, "b=2; Path=relative");
+
+    try std.testing.expectEqual(jar.cookies.items.len, 2);
+    try std.testing.expectEqualStrings(jar.cookies.items[0].path, "/");
+    try std.testing.expectEqualStrings(jar.cookies.items[1].path, "/");
+}
+
 test "addCookie returns InvalidFormat for a malformed header" {
     var jar = CookieJar.init(std.testing.allocator);
     defer jar.deinit();
@@ -609,6 +638,37 @@ test "cookieHeader omits cookies whose path does not match" {
     const header = try jar.cookieHeader(std.testing.allocator, std.testing.io, root_uri);
     defer std.testing.allocator.free(header);
     try std.testing.expectEqualStrings("", header);
+}
+
+test "cookieHeader does not leak cookies to a path prefix with no segment boundary" {
+    var jar = CookieJar.init(std.testing.allocator);
+    defer jar.deinit();
+
+    const set_uri = try std.Uri.parse("https://example.com/json/x");
+    try jar.addCookie(std.testing.io, set_uri, "scoped=1; Path=/json");
+
+    const other_uri = try std.Uri.parse("https://example.com/jsonLoad.php");
+    const header = try jar.cookieHeader(std.testing.allocator, std.testing.io, other_uri);
+    defer std.testing.allocator.free(header);
+    try std.testing.expectEqualStrings("", header);
+}
+
+test "cookieHeader matches a cookie path exactly and on segment boundaries" {
+    var jar = CookieJar.init(std.testing.allocator);
+    defer jar.deinit();
+
+    const set_uri = try std.Uri.parse("https://example.com/json/x");
+    try jar.addCookie(std.testing.io, set_uri, "scoped=1; Path=/json");
+
+    const exact_uri = try std.Uri.parse("https://example.com/json");
+    const exact = try jar.cookieHeader(std.testing.allocator, std.testing.io, exact_uri);
+    defer std.testing.allocator.free(exact);
+    try std.testing.expectEqualStrings("scoped=1", exact);
+
+    const sub_uri = try std.Uri.parse("https://example.com/json/bonusBuy.php/");
+    const sub = try jar.cookieHeader(std.testing.allocator, std.testing.io, sub_uri);
+    defer std.testing.allocator.free(sub);
+    try std.testing.expectEqualStrings("scoped=1", sub);
 }
 
 test "cookieHeader does not leak cookies to host with matching suffix but no dot boundary" {
