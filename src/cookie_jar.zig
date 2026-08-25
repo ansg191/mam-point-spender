@@ -261,8 +261,9 @@ pub fn addCookie(self: *CookieJar, io: Io, uri: std.Uri, header: []const u8) Add
                 cookie.expires_at = now +| max_age;
             },
             .Path => {
-                // RFC 6265 section 5.2.4: an empty or relative Path attribute falls back to the default path.
-                cookie.path = if (val.len == 0 or val[0] != '/') "/" else val;
+                // RFC 6265 section 5.2.4: an empty or relative Path attribute falls back to the
+                // default path, which `cookie.path` already holds. Only an absolute path overrides it.
+                if (val.len > 0 and val[0] == '/') cookie.path = val;
             },
             .Secure => {
                 cookie.secure = true;
