@@ -10,6 +10,9 @@ const MamClient = mam_point_spender.MamClient;
 const MAX_BUFFER = 99_999;
 const SECS_PER_WEEK = 7 * 24 * 3600;
 
+// Cap on how much of a rejected server-supplied vip_until value is echoed into the log.
+const MAX_LOGGED_VIP_UNTIL = 64;
+
 pub fn main(init: std.process.Init) !void {
     const gpa = init.gpa;
     const io = init.io;
@@ -131,9 +134,22 @@ fn getUserInfo(gpa: Allocator, client: *MamClient, mam_id: []const u8) !std.json
 }
 
 fn maximizeVip(gpa: Allocator, io: Io, client: *MamClient, ui: *const MamClient.SnatchSummary) !void {
-    // Parse when VIP expires
-    const expiry_raw = ui.vip_until orelse "2020-01-01 01:00:00";
-    const expiry = (try zeit.instantFromText(.iso8601, expiry_raw, &zeit.utc)).unixTimestamp();
+    // Parse when VIP expires. The timestamp comes straight from the server, so
+    // a value we cannot parse is treated as an already expired VIP instead of
+    // aborting the run.
+    var expiry: i64 = 0;
+    if (ui.vip_until) |raw| {
+        expiry = parseVipExpiry(raw) catch |err| blk: {
+            // `raw` is server-supplied: escape it so control characters cannot forge
+            // log lines, and bound it so an oversized value cannot flood the log.
+            std.log.warn("Failed to parse vip_until \"{f}\" ({d} bytes): {}", .{
+                std.zig.fmtString(raw[0..@min(raw.len, MAX_LOGGED_VIP_UNTIL)]),
+                raw.len,
+                err,
+            });
+            break :blk 0;
+        };
+    }
 
     const now = Io.Clock.real.now(io).toSeconds();
 
@@ -168,6 +184,43 @@ fn eligibleVipDuration(remaining: i64) i64 {
     const min_purchase_duration = SECS_PER_WEEK;
     const available: i64 = max_vip_duration - remaining;
     return if (available >= min_purchase_duration) available else 0;
+}
+
+// Parses a VIP expiry timestamp into a unix timestamp.
+//
+// MAM reports the expiry as a MySQL DATETIME ("YYYY-MM-DD hh:mm:ss"). The value
+// is server-controlled and the ISO8601 parser reads past the end of its input
+// on truncated timestamps, so the exact shape is validated here before the
+// string is handed over.
+fn parseVipExpiry(raw: []const u8) !i64 {
+    // "YYYY-MM-DD hh:mm:ss"
+    if (raw.len != 19) return error.InvalidTimestamp;
+    if (raw[4] != '-' or raw[7] != '-') return error.InvalidTimestamp;
+    // MAM uses a space, but ISO8601 uses 'T' as the date/time separator.
+    if (raw[10] != ' ' and raw[10] != 'T') return error.InvalidTimestamp;
+    if (raw[13] != ':' or raw[16] != ':') return error.InvalidTimestamp;
+
+    for (raw[0..4]) |c| if (!std.ascii.isDigit(c)) return error.InvalidTimestamp;
+    const month = try parseTwoDigits(raw[5..7]);
+    const day = try parseTwoDigits(raw[8..10]);
+    const hour = try parseTwoDigits(raw[11..13]);
+    const minute = try parseTwoDigits(raw[14..16]);
+    const second = try parseTwoDigits(raw[17..19]);
+
+    // The month is cast straight into an `enum(u4)`, so anything outside 1-12
+    // would produce an invalid enum value.
+    if (month < 1 or month > 12) return error.InvalidTimestamp;
+    if (day < 1 or day > 31) return error.InvalidTimestamp;
+    if (hour > 23 or minute > 59 or second > 59) return error.InvalidTimestamp;
+
+    return (try zeit.instantFromText(.iso8601, raw, &zeit.utc)).unixTimestamp();
+}
+
+// Parses a zero-padded two digit field, rejecting anything that is not a digit
+// (including the signs `std.fmt.parseInt` would otherwise accept).
+fn parseTwoDigits(field: *const [2]u8) error{InvalidTimestamp}!u8 {
+    for (field) |c| if (!std.ascii.isDigit(c)) return error.InvalidTimestamp;
+    return (field[0] - '0') * 10 + (field[1] - '0');
 }
 
 fn purchasePoints(gpa: Allocator, client: *MamClient, points: u32, buffer: u32) !void {
@@ -211,4 +264,38 @@ test "eligibleVipDuration returns 0 when VIP outlasts the cap" {
     // ~2^63 seconds of eligible time, triggering a wasted purchase.
     try std.testing.expectEqual(@as(i64, 0), eligibleVipDuration(52 * SECS_PER_WEEK));
     try std.testing.expectEqual(@as(i64, 0), eligibleVipDuration(std.math.maxInt(i64)));
+}
+
+test "parseVipExpiry parses MAM timestamps" {
+    try std.testing.expectEqual(@as(i64, 1796126400), try parseVipExpiry("2026-12-01 12:00:00"));
+    try std.testing.expectEqual(@as(i64, 1796126400), try parseVipExpiry("2026-12-01T12:00:00"));
+    try std.testing.expectEqual(@as(i64, 1577840400), try parseVipExpiry("2020-01-01 01:00:00"));
+}
+
+test "parseVipExpiry rejects truncated timestamps" {
+    // Each of these makes the ISO8601 parser read past the end of the input.
+    try std.testing.expectError(error.InvalidTimestamp, parseVipExpiry("2020-01-0"));
+    try std.testing.expectError(error.InvalidTimestamp, parseVipExpiry("2020-01-01 0"));
+    try std.testing.expectError(error.InvalidTimestamp, parseVipExpiry("2020-01-01 01:"));
+    try std.testing.expectError(error.InvalidTimestamp, parseVipExpiry("2020-01-01 01:00:"));
+    try std.testing.expectError(error.InvalidTimestamp, parseVipExpiry("2020-01-01 01:00:00+"));
+    try std.testing.expectError(error.InvalidTimestamp, parseVipExpiry(""));
+}
+
+test "parseVipExpiry rejects out of range fields" {
+    // A zero month is cast into an `enum(u4)` that has no such value.
+    try std.testing.expectError(error.InvalidTimestamp, parseVipExpiry("0000-00-00 00:00:00"));
+    try std.testing.expectError(error.InvalidTimestamp, parseVipExpiry("2020-13-01 01:00:00"));
+    try std.testing.expectError(error.InvalidTimestamp, parseVipExpiry("2020-01-32 01:00:00"));
+    try std.testing.expectError(error.InvalidTimestamp, parseVipExpiry("2020-01-01 24:00:00"));
+    try std.testing.expectError(error.InvalidTimestamp, parseVipExpiry("2020-01-01 01:60:00"));
+    try std.testing.expectError(error.InvalidTimestamp, parseVipExpiry("2020-01-01 01:00:60"));
+}
+
+test "parseVipExpiry rejects malformed timestamps" {
+    // Ten fractional digits underflow the parser's significand arithmetic.
+    try std.testing.expectError(error.InvalidTimestamp, parseVipExpiry("2020-01-01 01:00:00.1234567890"));
+    try std.testing.expectError(error.InvalidTimestamp, parseVipExpiry("2020/01/01 01:00:00"));
+    try std.testing.expectError(error.InvalidTimestamp, parseVipExpiry("2020-01-01 01:00:+0"));
+    try std.testing.expectError(error.InvalidTimestamp, parseVipExpiry("not a timestamp!!!!"));
 }
