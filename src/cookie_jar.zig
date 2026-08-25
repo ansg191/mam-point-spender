@@ -234,8 +234,8 @@ pub fn addCookie(self: *CookieJar, io: Io, uri: std.Uri, header: []const u8) Add
             },
             .Expires => {
                 if (cookie.expires_at != 0) continue; // Max-Age takes precedence over Expires, so ignore Expires if Max-Age is already set
-                const instant = zeit.instantFromText(.rfc1123, val, &zeit.utc) catch return error.InvalidFormat;
-                cookie.expires_at = instant.unixTimestamp();
+                const time = try parseHttpDate(val);
+                cookie.expires_at = time.instant().unixTimestamp();
             },
             .MaxAge => {
                 const max_age = std.fmt.parseInt(i64, val, 10) catch return error.InvalidFormat;
@@ -267,6 +267,44 @@ pub fn addCookie(self: *CookieJar, io: Io, uri: std.Uri, header: []const u8) Add
     }
 
     try self.cookies.append(self.arena.allocator(), cookie);
+}
+
+// Parses an RFC 1123 IMF-fixdate: "Www, DD Mmm YYYY HH:MM:SS GMT", exactly 29 bytes.
+// zeit's RFC 1123 parser guards its indexing with std.debug.assert, which is compiled out in
+// release builds, so a malformed server-supplied date would index out of bounds there. Validate
+// the shape ourselves and build the time directly so that parser is never handed unchecked input.
+fn parseHttpDate(s: []const u8) error{InvalidFormat}!zeit.Time {
+    if (s.len != 29) return error.InvalidFormat;
+    if (s[3] != ',' or s[4] != ' ' or s[7] != ' ' or s[11] != ' ' or
+        s[16] != ' ' or s[19] != ':' or s[22] != ':' or s[25] != ' ') return error.InvalidFormat;
+    if (!std.mem.eql(u8, s[26..29], "GMT")) return error.InvalidFormat;
+    for ([_]usize{ 5, 6, 12, 13, 14, 15, 17, 18, 20, 21, 23, 24 }) |i| {
+        if (!std.ascii.isDigit(s[i])) return error.InvalidFormat;
+    }
+
+    // The weekday is validated for shape only. Servers routinely emit a weekday that disagrees
+    // with the date, so cross-checking it against the date would reject legitimate cookies.
+    const weekday_buf: [3]u8 = .{ std.ascii.toLower(s[0]), std.ascii.toLower(s[1]), std.ascii.toLower(s[2]) };
+    _ = std.meta.stringToEnum(zeit.Weekday, &weekday_buf) orelse return error.InvalidFormat;
+
+    const month_buf: [3]u8 = .{ std.ascii.toLower(s[8]), std.ascii.toLower(s[9]), std.ascii.toLower(s[10]) };
+    const month = std.meta.stringToEnum(zeit.Month, &month_buf) orelse return error.InvalidFormat;
+
+    const day = std.fmt.parseInt(u5, s[5..7], 10) catch return error.InvalidFormat;
+    const year = std.fmt.parseInt(i32, s[12..16], 10) catch return error.InvalidFormat;
+    const hour = std.fmt.parseInt(u5, s[17..19], 10) catch return error.InvalidFormat;
+    const minute = std.fmt.parseInt(u6, s[20..22], 10) catch return error.InvalidFormat;
+    const second = std.fmt.parseInt(u6, s[23..25], 10) catch return error.InvalidFormat;
+    if (day < 1 or day > month.lastDay(year) or hour > 23 or minute > 59 or second > 60) return error.InvalidFormat;
+
+    return .{
+        .year = year,
+        .month = month,
+        .day = day,
+        .hour = hour,
+        .minute = minute,
+        .second = second,
+    };
 }
 
 test "addCookie" {
@@ -520,6 +558,45 @@ test "addCookie returns InvalidFormat for a malformed header" {
 
     const uri = try std.Uri.parse("https://example.com/");
     try std.testing.expectError(error.InvalidFormat, jar.addCookie(std.testing.io, uri, "no-equals-sign"));
+}
+
+test "addCookie returns InvalidFormat for malformed Expires values" {
+    const headers = [_][]const u8{
+        "a=1; Expires=",
+        "a=1; Expires=1 x",
+        "a=1; Expires=1 jan",
+        "a=1; Expires=Wed, 09 Jun 2021 10:18:1",
+        "a=1; Expires=Wed, 09 Jun 2021 10:18:14 UTC",
+        "a=1; Expires=Wed| 09 Jun 2021 10:18:14 GMT",
+        "a=1; Expires=123, 09 Jun 2021 10:18:14 GMT",
+        "a=1; Expires=Xyz, 09 Jun 2021 10:18:14 GMT",
+        "a=1; Expires=Wed, 09 Xyz 2021 10:18:14 GMT",
+        "a=1; Expires=Wed, 32 Jun 2021 10:18:14 GMT",
+        "a=1; Expires=Wed, 31 Jun 2021 10:18:14 GMT",
+        "a=1; Expires=Wed, 00 Jun 2021 10:18:14 GMT",
+        "a=1; Expires=Wed, 09 Jun 2021 24:18:14 GMT",
+        "a=1; Expires=Wed, 09 Jun 2021 10:60:14 GMT",
+        "a=1; Expires=Wed, 09 Jun 2021 10:18:61 GMT",
+        "a=1; Expires=Wed, 09 Jun 20x1 10:18:14 GMT",
+    };
+
+    const uri = try std.Uri.parse("https://example.com/");
+    for (headers) |header| {
+        var jar = CookieJar.init(std.testing.allocator);
+        defer jar.deinit();
+        try std.testing.expectError(error.InvalidFormat, jar.addCookie(std.testing.io, uri, header));
+    }
+}
+
+test "parseHttpDate parses a well-formed IMF-fixdate" {
+    const time = try parseHttpDate("Wed, 09 Jun 2021 10:18:14 GMT");
+    try std.testing.expectEqual(@as(i32, 2021), time.year);
+    try std.testing.expectEqual(zeit.Month.jun, time.month);
+    try std.testing.expectEqual(@as(u5, 9), time.day);
+    try std.testing.expectEqual(@as(u5, 10), time.hour);
+    try std.testing.expectEqual(@as(u6, 18), time.minute);
+    try std.testing.expectEqual(@as(u6, 14), time.second);
+    try std.testing.expectEqual(@as(i64, 1623233894), time.instant().unixTimestamp());
 }
 
 test "addCookie ignores unknown attributes" {
