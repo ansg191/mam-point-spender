@@ -144,14 +144,14 @@ pub fn cookieHeader(self: *const CookieJar, gpa: Allocator, io: Io, uri: std.Uri
         if (cookie.expires_at < now and cookie.expires_at != 0) continue; // Skip expired cookies, but allow session cookies
 
         // Domain match: exact, or host ends with "." ++ domain.
+        // Domain names are case-insensitive (RFC 6265 5.1.3).
         const domain = if (cookie.domain.len > 0 and cookie.domain[0] == '.')
             cookie.domain[1..]
         else
             cookie.domain;
-        const is_exact = std.mem.eql(u8, host.bytes, domain);
-        const is_subdomain = host.bytes.len > domain.len and
-            std.mem.endsWith(u8, host.bytes, domain) and
-            host.bytes[host.bytes.len - domain.len - 1] == '.';
+        const parent: Io.net.HostName = .{ .bytes = domain };
+        const is_exact = std.ascii.eqlIgnoreCase(host.bytes, domain);
+        const is_subdomain = !is_exact and parent.sameParentDomain(host);
         if (!is_exact and !is_subdomain) continue; // Domain does not match
         if (!cookie.include_subdomains and !is_exact) continue; // Subdomain matching disabled
 
@@ -207,7 +207,7 @@ pub fn addCookie(self: *CookieJar, io: Io, uri: std.Uri, header: []const u8) Add
     // Default cookie values
     const host = try uri.getHostAlloc(self.arena.allocator());
     var cookie: Cookie = .{
-        .domain = host.bytes,
+        .domain = try std.ascii.allocLowerString(self.arena.allocator(), host.bytes),
         .include_subdomains = false,
         .path = "/",
         .secure = false,
@@ -229,7 +229,22 @@ pub fn addCookie(self: *CookieJar, io: Io, uri: std.Uri, header: []const u8) Add
         const attr = AttributeField.map.get(key) orelse continue; // Ignore unknown attributes
         switch (attr) {
             .Domain => {
-                cookie.domain = val;
+                // RFC 6265 5.2.3: an empty domain-attribute is ignored, and a
+                // single leading dot is stripped.
+                const domain = if (val.len > 0 and val[0] == '.') val[1..] else val;
+                if (domain.len == 0) continue;
+
+                // RFC 6265 5.3.5/5.3.6: the whole cookie is ignored if the host is
+                // an IP literal, if the attribute is a bare TLD, or if the request
+                // host does not domain-match the attribute.
+                if (Io.net.IpAddress.parseLiteral(host.bytes)) |_| {
+                    return;
+                } else |_| {}
+                if (std.mem.findScalar(u8, domain, '.') == null) return;
+                const parent: Io.net.HostName = .{ .bytes = domain };
+                if (!parent.sameParentDomain(host)) return;
+
+                cookie.domain = try std.ascii.allocLowerString(self.arena.allocator(), domain);
                 cookie.include_subdomains = true;
             },
             .Expires => {
@@ -449,8 +464,88 @@ test "addCookie with Domain attribute enables subdomain matching" {
     const uri = try std.Uri.parse("https://example.com/");
     try jar.addCookie(std.testing.io, uri, "a=1; Domain=.example.com");
 
-    try std.testing.expectEqualStrings(".example.com", jar.cookies.items[0].domain);
+    try std.testing.expectEqualStrings("example.com", jar.cookies.items[0].domain);
     try std.testing.expect(jar.cookies.items[0].include_subdomains);
+}
+
+test "addCookie ignores a Domain attribute the host does not domain-match" {
+    var jar = CookieJar.init(std.testing.allocator);
+    defer jar.deinit();
+
+    const uri = try std.Uri.parse("https://www.example.com/");
+    try jar.addCookie(std.testing.io, uri, "a=1; Domain=other.com");
+    try jar.addCookie(std.testing.io, uri, "b=1; Domain=notexample.com");
+    // A host may not widen the scope to one of its own children either.
+    try jar.addCookie(std.testing.io, uri, "c=1; Domain=api.www.example.com");
+
+    try std.testing.expectEqual(@as(usize, 0), jar.cookies.items.len);
+}
+
+test "addCookie ignores a bare TLD Domain attribute" {
+    var jar = CookieJar.init(std.testing.allocator);
+    defer jar.deinit();
+
+    const uri = try std.Uri.parse("https://www.example.com/");
+    try jar.addCookie(std.testing.io, uri, "a=1; Domain=com");
+    try jar.addCookie(std.testing.io, uri, "b=1; Domain=.com");
+
+    try std.testing.expectEqual(@as(usize, 0), jar.cookies.items.len);
+}
+
+test "addCookie ignores a Domain attribute on an IP literal host" {
+    var jar = CookieJar.init(std.testing.allocator);
+    defer jar.deinit();
+
+    const uri = try std.Uri.parse("http://127.0.0.1:8080/");
+    try jar.addCookie(std.testing.io, uri, "a=1; Domain=0.0.1");
+    try jar.addCookie(std.testing.io, uri, "b=1; Domain=127.0.0.1");
+
+    try std.testing.expectEqual(@as(usize, 0), jar.cookies.items.len);
+
+    // Without a Domain attribute the cookie is still host-only scoped.
+    try jar.addCookie(std.testing.io, uri, "c=1");
+    try std.testing.expectEqual(@as(usize, 1), jar.cookies.items.len);
+    try std.testing.expectEqualStrings("127.0.0.1", jar.cookies.items[0].domain);
+    try std.testing.expect(!jar.cookies.items[0].include_subdomains);
+}
+
+test "addCookie accepts a parent Domain attribute and lowercases it" {
+    var jar = CookieJar.init(std.testing.allocator);
+    defer jar.deinit();
+
+    const uri = try std.Uri.parse("https://www.example.com/");
+    try jar.addCookie(std.testing.io, uri, "a=1; Domain=ExAmPlE.CoM");
+
+    try std.testing.expectEqual(@as(usize, 1), jar.cookies.items.len);
+    try std.testing.expectEqualStrings("example.com", jar.cookies.items[0].domain);
+    try std.testing.expect(jar.cookies.items[0].include_subdomains);
+}
+
+test "cookieHeader matches domains case-insensitively" {
+    var jar = CookieJar.init(std.testing.allocator);
+    defer jar.deinit();
+
+    const set_uri = try std.Uri.parse("https://www.example.com/");
+    try jar.addCookie(std.testing.io, set_uri, "shared=1; Domain=EXAMPLE.COM");
+    try jar.addCookie(std.testing.io, set_uri, "host_only=1");
+
+    const mixed_uri = try std.Uri.parse("https://WWW.Example.COM/");
+    const header = try jar.cookieHeader(std.testing.allocator, std.testing.io, mixed_uri);
+    defer std.testing.allocator.free(header);
+    try std.testing.expectEqualStrings("shared=1; host_only=1", header);
+}
+
+test "cookieHeader does not send a bare TLD scoped cookie to an unrelated host" {
+    var jar = CookieJar.init(std.testing.allocator);
+    defer jar.deinit();
+
+    const uri = try std.Uri.parse("https://www.example.com/");
+    try jar.addCookie(std.testing.io, uri, "leaky=1; Domain=com");
+
+    const other_uri = try std.Uri.parse("https://attacker.com/");
+    const header = try jar.cookieHeader(std.testing.allocator, std.testing.io, other_uri);
+    defer std.testing.allocator.free(header);
+    try std.testing.expectEqualStrings("", header);
 }
 
 test "addCookie Max-Age <= 0 skips the cookie" {
