@@ -207,7 +207,10 @@ pub fn addCookie(self: *CookieJar, io: Io, uri: std.Uri, header: []const u8) Add
     // Default cookie values
     const host = try uri.getHostAlloc(self.arena.allocator());
     var cookie: Cookie = .{
-        .domain = host.bytes,
+        // `getHostAlloc` only allocates when the host needs percent-decoding, otherwise it
+        // borrows from the URI text, which the caller frees once the request completes, so
+        // copy it into the arena to give the cookie ownership of its domain.
+        .domain = try self.arena.allocator().dupe(u8, host.bytes),
         .include_subdomains = false,
         .path = "/",
         .secure = false,
@@ -287,6 +290,22 @@ test "addCookie" {
     try std.testing.expectEqualStrings(jar.cookies.items[1].path, "/");
     try std.testing.expect(!jar.cookies.items[1].secure);
     try std.testing.expectEqual(jar.cookies.items[1].expires_at, 1623233894);
+}
+
+test "addCookie copies the host out of the URI text" {
+    var jar = CookieJar.init(std.testing.allocator);
+    defer jar.deinit();
+
+    // `std.Uri.parse` points the host at the text it was given, so scribbling over that
+    // text afterwards must not disturb a cookie that is already in the jar.
+    const url = try std.testing.allocator.dupe(u8, "https://example.com/path");
+    defer std.testing.allocator.free(url);
+    const uri = try std.Uri.parse(url);
+    try jar.addCookie(std.testing.io, uri, "sessionId=abc123; Path=/");
+    @memset(url, 'x');
+
+    try std.testing.expectEqual(@as(usize, 1), jar.cookies.items.len);
+    try std.testing.expectEqualStrings("example.com", jar.cookies.items[0].domain);
 }
 
 test "cookieHeader" {
