@@ -82,10 +82,13 @@ fn get(self: *MamClient, gpa: Allocator, uri: std.Uri, cookie_option: CookieOpti
         @min(response.head.content_length orelse 0, MAX_RESPONSE_BYTES);
 
     // Handle set-cookie headers
+    // `req.uri` is used instead of `uri`, as the client updates it in place when
+    // following redirects. The response headers belong to the final hop, so they
+    // must be attributed to the final URI.
     var header_it = response.head.iterateHeaders();
     while (header_it.next()) |header| {
         if (std.ascii.eqlIgnoreCase(header.name, "set-cookie")) {
-            try self.cookie_jar.addCookie(self.client.io, uri, header.value);
+            try self.cookie_jar.addCookie(self.client.io, req.uri, header.value);
         }
     }
 
