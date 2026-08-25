@@ -43,7 +43,7 @@ pub const RequestError = CookieJar.CookieHeaderError ||
     http.Client.Request.ReceiveHeadError ||
     Io.Writer.Error ||
     Io.Reader.StreamError ||
-    error{ BadResponseStatus, ResponseBodyTooLarge };
+    error{ BadResponseStatus, ResponseBodyTooLarge, StreamTooLong };
 
 fn get(self: *MamClient, gpa: Allocator, uri: std.Uri, cookie_option: CookieOption) RequestError![]const u8 {
     var redirect_buffer: [8 * 1024]u8 = undefined;
@@ -90,13 +90,18 @@ fn get(self: *MamClient, gpa: Allocator, uri: std.Uri, cookie_option: CookieOpti
     }
 
     // Handle body
-    var body: Io.Writer.Allocating = try .initCapacity(gpa, content_length);
-    defer body.deinit();
+    var body: std.ArrayList(u8) = try .initCapacity(gpa, content_length);
+    errdefer body.deinit(gpa);
 
+    // `stream` performs a single transfer, so it truncates any body that does
+    // not arrive all at once; `appendRemaining` loops until end of stream.
+    // The limit is one past the maximum because `appendRemaining` reports
+    // `error.StreamTooLong` as soon as the limit is consumed, which would
+    // otherwise reject a body of exactly MAX_RESPONSE_BYTES.
     var reader = response.reader(&transfer_buffer);
-    _ = try reader.stream(&body.writer, .limited(MAX_RESPONSE_BYTES));
+    try reader.appendRemaining(gpa, &body, .limited(MAX_RESPONSE_BYTES + 1));
 
-    return body.toOwnedSlice();
+    return body.toOwnedSlice(gpa);
 }
 
 pub fn get_snatch_summary(self: *MamClient, gpa: Allocator, cookie_option: CookieOption) !std.json.Parsed(types.SnatchSummary) {
@@ -173,6 +178,9 @@ const TestServer = struct {
         response_status: std.http.Status = .ok,
         response_extra_headers: []const std.http.Header = &.{},
         response_body: []const u8 = "",
+        // When set, the body is sent chunked, one HTTP chunk per entry, instead
+        // of as a single Content-Length body.
+        response_chunks: ?[]const []const u8 = null,
 
         fn deinit(self: *RequestRecorder) void {
             self.request_line.deinit(self.gpa);
@@ -225,18 +233,29 @@ const TestServer = struct {
         var stream_writer = stream.writer(testing.io, &write_buf);
         const w = &stream_writer.interface;
         try w.print(
-            "HTTP/1.1 {d} {s}\r\nContent-Type: application/json\r\nContent-Length: {d}\r\nConnection: close\r\n",
+            "HTTP/1.1 {d} {s}\r\nContent-Type: application/json\r\nConnection: close\r\n",
             .{
                 @intFromEnum(recorder.response_status),
                 recorder.response_status.phrase().?,
-                recorder.response_body.len,
             },
         );
+        if (recorder.response_chunks != null) {
+            try w.print("Transfer-Encoding: chunked\r\n", .{});
+        } else {
+            try w.print("Content-Length: {d}\r\n", .{recorder.response_body.len});
+        }
         for (recorder.response_extra_headers) |header| {
             try w.print("{s}: {s}\r\n", .{ header.name, header.value });
         }
         try w.print("\r\n", .{});
-        try w.writeAll(recorder.response_body);
+        if (recorder.response_chunks) |chunks| {
+            for (chunks) |chunk| {
+                try w.print("{x}\r\n{s}\r\n", .{ chunk.len, chunk });
+            }
+            try w.print("0\r\n\r\n", .{});
+        } else {
+            try w.writeAll(recorder.response_body);
+        }
         try w.flush();
     }
 };
@@ -448,4 +467,58 @@ test "get stores Set-Cookie response headers into the jar" {
     try testing.expectEqual(@as(usize, 1), cookie_jar.cookies.items.len);
     try testing.expectEqualStrings("sid", cookie_jar.cookies.items[0].name);
     try testing.expectEqualStrings("abc123", cookie_jar.cookies.items[0].value);
+}
+
+test "get reassembles a body delivered in multiple chunks" {
+    const response_chunks = [_][]const u8{
+        "{\"classname\":\"VIP\",\"seedbonus\":50000,\"uid\":12345,",
+        "\"username\":\"tester\",\"vip_until\":null,",
+        "\"wedges\":42}",
+    };
+
+    var recorder: TestServer.RequestRecorder = .{
+        .gpa = testing.allocator,
+        .response_chunks = &response_chunks,
+    };
+    defer recorder.deinit();
+
+    var ts = try TestServer.start(testing.allocator, &recorder);
+
+    var cookie_jar = CookieJar.init(testing.allocator);
+    defer cookie_jar.deinit();
+
+    var client = makeTestClient(&cookie_jar, ts.base_url);
+    defer client.deinit();
+
+    const parsed = try client.get_snatch_summary(testing.allocator, .none);
+    defer parsed.deinit();
+    try ts.finish(testing.allocator);
+
+    try testing.expectEqualStrings("VIP", parsed.value.classname);
+    try testing.expectEqualStrings("tester", parsed.value.username);
+    try testing.expectEqual(@as(u64, 12345), parsed.value.uid);
+    try testing.expectEqual(@as(u64, 42), parsed.value.wedges);
+}
+
+test "get returns an empty body for a zero-length response" {
+    var recorder: TestServer.RequestRecorder = .{ .gpa = testing.allocator, .response_body = "" };
+    defer recorder.deinit();
+
+    var ts = try TestServer.start(testing.allocator, &recorder);
+
+    var cookie_jar = CookieJar.init(testing.allocator);
+    defer cookie_jar.deinit();
+
+    var client = makeTestClient(&cookie_jar, ts.base_url);
+    defer client.deinit();
+
+    var url_buf: [64]u8 = undefined;
+    const url = try std.fmt.bufPrint(&url_buf, "{s}/empty", .{ts.base_url});
+    const uri = try std.Uri.parse(url);
+
+    const body = try client.get(testing.allocator, uri, .none);
+    defer testing.allocator.free(body);
+    try ts.finish(testing.allocator);
+
+    try testing.expectEqualStrings("", body);
 }
