@@ -8,6 +8,7 @@ const mam_point_spender = @import("mam_point_spender");
 const MamClient = mam_point_spender.MamClient;
 
 const MAX_BUFFER = 99_999;
+const SECS_PER_WEEK = 7 * 24 * 3600;
 
 pub fn main(init: std.process.Init) !void {
     const gpa = init.gpa;
@@ -136,14 +137,11 @@ fn maximizeVip(gpa: Allocator, io: Io, client: *MamClient, ui: *const MamClient.
 
     const now = Io.Clock.real.now(io).toSeconds();
 
-    // VIP has a max duration of 12.8 weeks
-    // Calculate how much VIP time we can buy without wasting points
-    const SECS_PER_WEEK = 7 * 24 * 3600;
-    const max_vip_duration = 128 * SECS_PER_WEEK / 10;
-    const min_purchase_duration = SECS_PER_WEEK;
-    const remaining = @max(0, expiry -| now);
-    const available = max_vip_duration - remaining;
-    const eligible = if (available >= min_purchase_duration) available else 0;
+    // Keep this signed: `@max` narrows its result type to the smallest integer
+    // type covering the possible range, so `@max(0, expiry -| now)` yields a
+    // `u63` and every subtraction derived from it would be unsigned.
+    const remaining: i64 = @max(0, expiry -| now);
+    const eligible = eligibleVipDuration(remaining);
 
     const remaining_weeks = @as(f64, @floatFromInt(remaining)) / @as(f64, @floatFromInt(SECS_PER_WEEK));
     const eligible_weeks = @as(f64, @floatFromInt(eligible)) / @as(f64, @floatFromInt(SECS_PER_WEEK));
@@ -156,6 +154,20 @@ fn maximizeVip(gpa: Allocator, io: Io, client: *MamClient, ui: *const MamClient.
 
     std.log.info("Attempting to max out VIP", .{});
     try client.buyVip(gpa, .default);
+}
+
+/// Calculate how much VIP time we can buy without wasting points, given how
+/// many seconds of VIP time are left.
+///
+/// `remaining` can exceed the cap when MAM reports an expiry far in the future,
+/// so the arithmetic has to be signed: an unsigned subtraction would underflow
+/// and report a nonsensical amount of eligible time.
+fn eligibleVipDuration(remaining: i64) i64 {
+    // VIP has a max duration of 12.8 weeks
+    const max_vip_duration = 128 * SECS_PER_WEEK / 10;
+    const min_purchase_duration = SECS_PER_WEEK;
+    const available: i64 = max_vip_duration - remaining;
+    return if (available >= min_purchase_duration) available else 0;
 }
 
 fn purchasePoints(gpa: Allocator, client: *MamClient, points: u32, buffer: u32) !void {
@@ -172,4 +184,31 @@ fn purchasePoints(gpa: Allocator, client: *MamClient, points: u32, buffer: u32) 
             pts -= cost;
         }
     }
+}
+
+// =============================================================================
+// TESTS
+// =============================================================================
+
+test "eligibleVipDuration offers the full cap when VIP has lapsed" {
+    try std.testing.expectEqual(@as(i64, 128 * SECS_PER_WEEK / 10), eligibleVipDuration(0));
+}
+
+test "eligibleVipDuration subtracts the time already banked" {
+    try std.testing.expectEqual(
+        @as(i64, 128 * SECS_PER_WEEK / 10 - SECS_PER_WEEK),
+        eligibleVipDuration(SECS_PER_WEEK),
+    );
+}
+
+test "eligibleVipDuration returns 0 below the minimum purchase" {
+    const remaining = 128 * SECS_PER_WEEK / 10 - SECS_PER_WEEK + 1;
+    try std.testing.expectEqual(@as(i64, 0), eligibleVipDuration(remaining));
+}
+
+test "eligibleVipDuration returns 0 when VIP outlasts the cap" {
+    // An expiry well past the 12.8 week cap used to underflow and report
+    // ~2^63 seconds of eligible time, triggering a wasted purchase.
+    try std.testing.expectEqual(@as(i64, 0), eligibleVipDuration(52 * SECS_PER_WEEK));
+    try std.testing.expectEqual(@as(i64, 0), eligibleVipDuration(std.math.maxInt(i64)));
 }
