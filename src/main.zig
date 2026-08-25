@@ -184,6 +184,7 @@ fn eligibleVipDuration(remaining: i64) i64 {
     const min_purchase_duration = SECS_PER_WEEK;
     const available: i64 = max_vip_duration - remaining;
     return if (available >= min_purchase_duration) available else 0;
+}
 
 // Parses a VIP expiry timestamp into a unix timestamp.
 //
@@ -263,6 +264,7 @@ test "eligibleVipDuration returns 0 when VIP outlasts the cap" {
     // ~2^63 seconds of eligible time, triggering a wasted purchase.
     try std.testing.expectEqual(@as(i64, 0), eligibleVipDuration(52 * SECS_PER_WEEK));
     try std.testing.expectEqual(@as(i64, 0), eligibleVipDuration(std.math.maxInt(i64)));
+}
 
 test "parseVipExpiry parses MAM timestamps" {
     try std.testing.expectEqual(@as(i64, 1796126400), try parseVipExpiry("2026-12-01 12:00:00"));
