@@ -9,6 +9,9 @@ const MamClient = mam_point_spender.MamClient;
 
 const MAX_BUFFER = 99_999;
 
+// Cap on how much of a rejected server-supplied vip_until value is echoed into the log.
+const MAX_LOGGED_VIP_UNTIL = 64;
+
 pub fn main(init: std.process.Init) !void {
     const gpa = init.gpa;
     const io = init.io;
@@ -133,7 +136,13 @@ fn maximizeVip(gpa: Allocator, io: Io, client: *MamClient, ui: *const MamClient.
     var expiry: i64 = 0;
     if (ui.vip_until) |raw| {
         expiry = parseVipExpiry(raw) catch |err| blk: {
-            std.log.warn("Failed to parse vip_until \"{s}\": {}", .{ raw, err });
+            // `raw` is server-supplied: escape it so control characters cannot forge
+            // log lines, and bound it so an oversized value cannot flood the log.
+            std.log.warn("Failed to parse vip_until \"{f}\" ({d} bytes): {}", .{
+                std.zig.fmtString(raw[0..@min(raw.len, MAX_LOGGED_VIP_UNTIL)]),
+                raw.len,
+                err,
+            });
             break :blk 0;
         };
     }
