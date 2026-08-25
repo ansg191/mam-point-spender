@@ -134,6 +134,7 @@ pub fn cookieHeader(self: *const CookieJar, gpa: Allocator, io: Io, uri: std.Uri
     const host = try uri.getHost(&host_buffer);
 
     var writer = Io.Writer.Allocating.init(gpa);
+    defer writer.deinit(); // No-op once `toOwnedSlice` succeeds, frees the buffer if it doesn't
     // Writer can only fail if we run out of memory, so we can treat it as an OOM error
     uri.path.formatPath(&writer.writer) catch return Allocator.Error.OutOfMemory;
     const path = try writer.toOwnedSlice();
@@ -302,6 +303,23 @@ test "cookieHeader" {
     const header = try jar.cookieHeader(std.testing.allocator, std.testing.io, uri);
     defer std.testing.allocator.free(header);
     try std.testing.expectEqualStrings(header, "sessionId=abc123; theme=light");
+}
+
+test "cookieHeader frees the path writer when it fails" {
+    var jar = CookieJar.init(std.testing.allocator);
+    defer jar.deinit();
+
+    const uri = try std.Uri.parse("https://example.com/path");
+    try jar.addCookie(std.testing.io, uri, "sessionId=abc123; Path=/path; Secure");
+
+    // Let the path writer allocate its buffer, then fail the remap and the realloc inside
+    // `toOwnedSlice`, the one exit that leaves the writer still owning that buffer.
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{
+        .fail_index = 1,
+        .resize_fail_index = 0,
+    });
+    try std.testing.expectError(error.OutOfMemory, jar.cookieHeader(failing.allocator(), std.testing.io, uri));
+    try std.testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
 }
 
 test "Cookie.parseLine parses a well-formed Netscape cookie line" {
