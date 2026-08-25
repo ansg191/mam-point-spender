@@ -282,6 +282,11 @@ fn parseHttpDate(s: []const u8) error{InvalidFormat}!zeit.Time {
         if (!std.ascii.isDigit(s[i])) return error.InvalidFormat;
     }
 
+    // The weekday is validated for shape only. Servers routinely emit a weekday that disagrees
+    // with the date, so cross-checking it against the date would reject legitimate cookies.
+    const weekday_buf: [3]u8 = .{ std.ascii.toLower(s[0]), std.ascii.toLower(s[1]), std.ascii.toLower(s[2]) };
+    _ = std.meta.stringToEnum(zeit.Weekday, &weekday_buf) orelse return error.InvalidFormat;
+
     const month_buf: [3]u8 = .{ std.ascii.toLower(s[8]), std.ascii.toLower(s[9]), std.ascii.toLower(s[10]) };
     const month = std.meta.stringToEnum(zeit.Month, &month_buf) orelse return error.InvalidFormat;
 
@@ -563,6 +568,8 @@ test "addCookie returns InvalidFormat for malformed Expires values" {
         "a=1; Expires=Wed, 09 Jun 2021 10:18:1",
         "a=1; Expires=Wed, 09 Jun 2021 10:18:14 UTC",
         "a=1; Expires=Wed| 09 Jun 2021 10:18:14 GMT",
+        "a=1; Expires=123, 09 Jun 2021 10:18:14 GMT",
+        "a=1; Expires=Xyz, 09 Jun 2021 10:18:14 GMT",
         "a=1; Expires=Wed, 09 Xyz 2021 10:18:14 GMT",
         "a=1; Expires=Wed, 32 Jun 2021 10:18:14 GMT",
         "a=1; Expires=Wed, 31 Jun 2021 10:18:14 GMT",
