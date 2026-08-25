@@ -461,8 +461,10 @@ test "get refuses to follow redirects instead of resending the cookie" {
     var recorder: TestServer.RequestRecorder = .{
         .gpa = testing.allocator,
         .response_status = .found,
+        // Loopback, and deliberately a port nothing listens on: if redirect handling ever
+        // regressed, the test must fail rather than make a real outbound connection.
         .response_extra_headers = &.{
-            .{ .name = "Location", .value = "http://other.example.com/jsonLoad.php?snatch_summary" },
+            .{ .name = "Location", .value = "http://127.0.0.1:9/jsonLoad.php?snatch_summary" },
         },
     };
     defer recorder.deinit();
